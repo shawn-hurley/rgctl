@@ -107,12 +107,28 @@ pub fn ruby_call_unresolved(call: Node, source: &[u8]) -> bool {
 /// `function_symbols` SHOULD already be filtered to [`SymbolType::Function`].
 /// Prefer [`containing_function_from_scope`] during single-pass extraction.
 pub fn containing_function<'a>(node: Node, function_symbols: &[&'a Symbol]) -> Option<&'a Symbol> {
-    let line = node.start_position().row + 1;
+    let start = (node.start_position().row + 1, node.start_position().column);
+    let end = (node.end_position().row + 1, node.end_position().column);
     function_symbols
         .iter()
         .copied()
-        .filter(|s| line >= s.location.start_line && line <= s.location.end_line)
-        .min_by_key(|s| s.location.end_line - s.location.start_line)
+        .filter(|s| {
+            (s.location.start_line, s.location.start_column) <= start
+                && end <= (s.location.end_line, s.location.end_column)
+        })
+        .min_by_key(|s| {
+            let lines = s.location.end_line - s.location.start_line;
+            (
+                lines,
+                if lines == 0 {
+                    s.location
+                        .end_column
+                        .saturating_sub(s.location.start_column)
+                } else {
+                    usize::MAX
+                },
+            )
+        })
 }
 
 /// O(1) enclosing function via [`ScopeStack`] (single-pass AST engine).

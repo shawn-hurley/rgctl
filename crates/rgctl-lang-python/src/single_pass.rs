@@ -537,5 +537,8 @@ pub fn extract_all_single_pass(
         &mut relations,
     );
 
+    let module = rgctl_plugin_helpers::qualified_names::file_module(file_path, true);
+    rgctl_plugin_helpers::qualified_names::qualify(&module, &mut ctx.symbols, &mut relations);
+
     Ok(ExtractAllResult::from_parts(ctx.symbols, relations))
 }

@@ -946,7 +946,16 @@ impl LanguagePlugin for PythonPlugin {
 
     fn extract_symbols(&self, file_path: &Path, source: &[u8]) -> Result<Vec<Symbol>> {
         let tree = self.parse(file_path, source)?;
-        self.symbols_from_tree(tree.root_node(), source, file_path)
+        let mut symbols = self.symbols_from_tree(tree.root_node(), source, file_path)?;
+        rgctl_plugin_helpers::qualified_names::qualify_file(
+            "python",
+            file_path,
+            tree.root_node(),
+            source,
+            &mut symbols,
+            &mut [],
+        );
+        Ok(symbols)
     }
 
     fn extract_relations(
@@ -1177,7 +1186,7 @@ def helper():
         assert!(
             relations
                 .iter()
-                .any(|r| matches!(r.relation_type, RelationType::Calls) && r.to == "helper"),
+                .any(|r| matches!(r.relation_type, RelationType::Calls) && r.to == "test.helper"),
             "expected Calls -> helper, got {relations:?}"
         );
     }

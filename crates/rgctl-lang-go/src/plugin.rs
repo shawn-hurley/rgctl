@@ -1148,7 +1148,16 @@ impl LanguagePlugin for GoPlugin {
 
     fn extract_symbols(&self, file_path: &Path, source: &[u8]) -> Result<Vec<Symbol>> {
         let tree = self.parse(file_path, source)?;
-        self.symbols_from_tree(tree.root_node(), source, file_path)
+        let mut symbols = self.symbols_from_tree(tree.root_node(), source, file_path)?;
+        rgctl_plugin_helpers::qualified_names::qualify_file(
+            "go",
+            file_path,
+            tree.root_node(),
+            source,
+            &mut symbols,
+            &mut [],
+        );
+        Ok(symbols)
     }
 
     fn extract_relations(
@@ -1165,6 +1174,14 @@ impl LanguagePlugin for GoPlugin {
             "go",
             source,
             Some(root),
+            &mut sym_copy,
+            &mut relations,
+        );
+        rgctl_plugin_helpers::qualified_names::qualify_file(
+            "go",
+            file_path,
+            root,
+            source,
             &mut sym_copy,
             &mut relations,
         );
@@ -1453,7 +1470,7 @@ func helper() {}
         assert!(
             relations
                 .iter()
-                .any(|r| matches!(r.relation_type, RelationType::Calls) && r.to == "helper"),
+                .any(|r| matches!(r.relation_type, RelationType::Calls) && r.to == "demo.helper"),
             "expected Calls -> helper, got {relations:?}"
         );
     }

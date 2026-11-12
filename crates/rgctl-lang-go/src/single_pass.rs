@@ -387,5 +387,13 @@ pub fn extract_all_single_pass(
         &mut relations,
     );
 
+    let package = root
+        .named_children(&mut root.walk())
+        .find(|n| n.kind() == "package_clause")
+        .and_then(|n| n.named_child(0))
+        .and_then(|n| n.utf8_text(source).ok())
+        .unwrap_or("package");
+    rgctl_plugin_helpers::qualified_names::qualify(package, &mut ctx.symbols, &mut relations);
+
     Ok(ExtractAllResult::from_parts(ctx.symbols, relations))
 }
