@@ -52,6 +52,9 @@ fn cfg_round_trip_preserves_predicates_and_rejects_unversioned_lowering() {
     json.as_object_mut().unwrap().remove("revision");
     assert!(serde_json::from_value::<ControlFlowGraph>(json).is_err());
 
+    let mut prior = bytes.clone();
+    prior[4..8].copy_from_slice(&(CFG_SEMANTICS_VERSION - 1).to_le_bytes());
+    assert!(bincode::deserialize::<ControlFlowGraph>(&prior).is_err());
     let mut future = bytes;
     future[4] = future[4].wrapping_add(1);
     assert!(bincode::deserialize::<ControlFlowGraph>(&future).is_err());
@@ -66,6 +69,7 @@ fn lightweight_index_drops_old_semantics_before_fast_reuse_or_purge() {
         stable_key: "demo.rs\x1fexample\x1funchanged".into(),
         function_id: id,
         code_hash: "unchanged".into(),
+        source_location: None,
         flow_count: 0,
         vulnerable_count: 0,
     };
@@ -115,36 +119,39 @@ fn on_demand_rebuilds_old_archive_without_preserving_stale_records() {
     }
     let path = CfgPdgArchive::default_path(tmp.path());
     archive.write_to_path(&path).unwrap();
-    let mut bytes = std::fs::read(&path).unwrap();
-    bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
-    std::fs::write(&path, bytes).unwrap();
-    assert!(CfgPdgArchiveMmap::open(&path).is_err());
-    assert!(CfgPdgArchive::load_from_path(&path).is_err());
-    let rebuilt = ensure_cfg_pdg_for_source(EnsureCfgPdgOpts {
-        repo_root: tmp.path(),
-        language: "rust",
-        source,
-        function_name: "example",
-        file_path: Some("demo.rs"),
-        start_byte: None,
-        end_byte: None,
-        function_id: Some(id),
-        persist: true,
-    })
-    .unwrap();
-    assert!(
-        rebuilt
-            .pdg
-            .nodes
-            .values()
-            .any(|n| n.statement.kind == StatementKind::Branch && n.used_vars.contains("enabled"))
-    );
-    let view = CfgPdgArchiveMmap::open(&path).unwrap();
-    assert!(view.contains(id));
-    assert!(!view.contains(other));
-    assert_eq!(view.len(), 1);
-    assert_eq!(
-        u32::from_le_bytes(std::fs::read(&path).unwrap()[4..8].try_into().unwrap()),
-        ARCHIVE_VERSION
-    );
+    for old_version in [3u32, ARCHIVE_VERSION - 1] {
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&old_version.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(CfgPdgArchiveMmap::open(&path).is_err());
+        assert!(CfgPdgArchive::load_from_path(&path).is_err());
+        let rebuilt = ensure_cfg_pdg_for_source(EnsureCfgPdgOpts {
+            repo_root: tmp.path(),
+            language: "rust",
+            source,
+            function_name: "example",
+            file_path: Some("demo.rs"),
+            start_byte: None,
+            end_byte: None,
+            function_id: Some(id),
+            persist: true,
+        })
+        .unwrap();
+        assert!(
+            rebuilt
+                .pdg
+                .nodes
+                .values()
+                .any(|n| n.statement.kind == StatementKind::Branch
+                    && n.used_vars.contains("enabled"))
+        );
+        let view = CfgPdgArchiveMmap::open(&path).unwrap();
+        assert!(view.contains(id));
+        assert!(!view.contains(other));
+        assert_eq!(view.len(), 1);
+        assert_eq!(
+            u32::from_le_bytes(std::fs::read(&path).unwrap()[4..8].try_into().unwrap()),
+            ARCHIVE_VERSION
+        );
+    }
 }

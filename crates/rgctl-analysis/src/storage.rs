@@ -33,6 +33,28 @@ pub const ANALYSIS_BIN_SUFFIX: &str = ".analysis.bin";
 /// Sidecar index filename (`stable_key → metadata`) for incremental CFG without `load_all()`.
 pub const ANALYSIS_INDEX_FILE: &str = "analysis_index.bin";
 
+/// Canonical callable position used to reject relocated procedural cache hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisSourceLocation {
+    /// Declaration start byte.
+    pub start_byte: u32,
+    /// Exclusive declaration end byte.
+    pub end_byte: u32,
+    /// One-based declaration start line.
+    pub start_line: u32,
+}
+
+impl AnalysisSourceLocation {
+    /// Obtain a complete source anchor from canonical graph metadata.
+    pub fn from_node(node: &rgctl_graph::schema::Node) -> Option<Self> {
+        Some(Self {
+            start_byte: node.start_byte?,
+            end_byte: node.end_byte?,
+            start_line: u32::try_from(node.start_line?).ok()?,
+        })
+    }
+}
+
 /// Lightweight metadata for incremental CFG reuse (no CFG/PDG payload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisIndexEntry {
@@ -42,10 +64,20 @@ pub struct AnalysisIndexEntry {
     pub function_id: Uuid,
     /// BLAKE3 hash of the function body used for reuse.
     pub code_hash: String,
+    /// Source position; body hashes alone cannot validate absolute operand spans.
+    pub source_location: Option<AnalysisSourceLocation>,
     /// Number of taint flows recorded for this function.
     pub flow_count: usize,
     /// Number of vulnerable taint flows recorded for this function.
     pub vulnerable_count: usize,
+}
+
+impl AnalysisIndexEntry {
+    /// A missing or changed source anchor cannot qualify a fast cache hit.
+    pub fn matches_source(&self, node: &rgctl_graph::schema::Node) -> bool {
+        self.source_location.is_some()
+            && self.source_location == AnalysisSourceLocation::from_node(node)
+    }
 }
 
 /// Analysis results for a single function.
@@ -72,6 +104,16 @@ pub struct FunctionAnalysis {
 }
 
 impl FunctionAnalysis {
+    fn source_location(&self) -> Option<AnalysisSourceLocation> {
+        let facts = &self.cfg.as_ref()?.operands;
+        let span = facts.span?;
+        Some(AnalysisSourceLocation {
+            start_byte: span.start,
+            end_byte: span.end,
+            start_line: facts.source_line?,
+        })
+    }
+
     /// Stable cache key when body hash is known.
     pub fn stable_key(&self) -> Option<String> {
         let hash = self.code_hash.as_deref()?;
@@ -265,6 +307,7 @@ impl AnalysisStorage {
                 stable_key,
                 function_id: analysis.function_id,
                 code_hash: analysis.code_hash.clone().unwrap_or_default(),
+                source_location: analysis.source_location(),
                 flow_count,
                 vulnerable_count,
             },
@@ -293,6 +336,7 @@ impl AnalysisStorage {
                     stable_key,
                     function_id: analysis.function_id,
                     code_hash: analysis.code_hash.clone().unwrap_or_default(),
+                    source_location: analysis.source_location(),
                     flow_count,
                     vulnerable_count,
                 })
@@ -342,6 +386,7 @@ impl AnalysisStorage {
                     stable_key,
                     function_id: analysis.function_id,
                     code_hash: analysis.code_hash.clone().unwrap_or_default(),
+                    source_location: analysis.source_location(),
                     flow_count,
                     vulnerable_count,
                 },
