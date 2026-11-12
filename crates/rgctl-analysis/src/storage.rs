@@ -19,9 +19,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-/// Stable cache key across graph re-indexes (UUIDs may change).
+/// Stable cache key within one lowering revision across graph re-indexes.
 pub fn stable_function_key(file_path: &str, function_name: &str, code_hash: &str) -> String {
-    format!("{file_path}\x1f{function_name}\x1f{code_hash}")
+    format!(
+        "{file_path}\x1f{function_name}\x1f{code_hash}\x1fcfg{}",
+        crate::cfg::CFG_SEMANTICS_VERSION
+    )
 }
 
 /// Suffix for bincode per-function analysis artifacts (`{uuid}.analysis.bin`).
@@ -33,7 +36,7 @@ pub const ANALYSIS_INDEX_FILE: &str = "analysis_index.bin";
 /// Lightweight metadata for incremental CFG reuse (no CFG/PDG payload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisIndexEntry {
-    /// Stable cache key (`file\x1fname\x1fcode_hash`).
+    /// Versioned stable cache key (`file\x1fname\x1fcode_hash\x1fcfgN`).
     pub stable_key: String,
     /// Current graph node UUID for the function.
     pub function_id: Uuid,
@@ -215,8 +218,12 @@ impl AnalysisStorage {
         let bytes = fs::read(&path)?;
         let entries: Vec<AnalysisIndexEntry> = bincode::deserialize(&bytes)
             .map_err(|e| Error::SerdeError(format!("analysis index decode: {e}")))?;
+        let suffix = format!("\x1fcfg{}", crate::cfg::CFG_SEMANTICS_VERSION);
         Ok(entries
             .into_iter()
+            // Source hashes do not validate lowering from an older binary.
+            // Filter before fast discover reuse or stale-key purges.
+            .filter(|entry| entry.stable_key.ends_with(&suffix))
             .map(|e| (e.stable_key.clone(), e))
             .collect())
     }

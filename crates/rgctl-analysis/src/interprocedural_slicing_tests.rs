@@ -227,9 +227,7 @@ fn caller_predicate_dependencies_survive_the_boundary() {
         &[("exercise", "consume", 5)],
     );
     let locations = fixture.slice("consume", "value", 9, false);
-    // This commit follows existing control edges. Recovering the predicate
-    // variable definition in CFG lowering is a separate repair.
-    for line in [3, 4, 5] {
+    for line in [2, 3, 4, 5] {
         assert!(
             locations.contains(&("exercise".into(), line)),
             "missing caller predicate/data dependency {line}: {locations:?}"

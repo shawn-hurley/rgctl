@@ -12,6 +12,10 @@ use std::collections::{HashMap, HashSet};
 use tracing::warn;
 use tree_sitter::{Node, Tree};
 
+#[cfg(test)]
+#[path = "cfg_predicate_tests.rs"]
+mod predicate_tests;
+
 /// Maximum AST recursion depth for CFG expression walks (matches C++ extraction cap).
 const AST_WALK_MAX_DEPTH: usize = 2048;
 
@@ -3858,13 +3862,10 @@ impl<'a> CfgBuilder<'a> {
             return Ok(());
         }
 
-        self.add_statement_to_current(Statement {
-            kind: StatementKind::Branch,
-            line: cond.start_position().row + 1,
-            text,
-            defined_vars: SmallVec::new(),
-            used_vars: SmallVec::new(),
-        });
+        // Conditions are value uses (and may contain assignments), not just
+        // control-flow labels. Reuse ordinary lowering to preserve lexical
+        // scope and def/use facts for the PDG.
+        self.add_statement(cond, source, StatementKind::Branch)?;
         self.note_setjmp_in_expr(cond, source);
         let from = self.current_block;
         self.cfg.add_edge(from, true_dest, CfgEdgeType::IfTrue);
