@@ -13,6 +13,28 @@ use uuid::Uuid;
 /// Lazy per-function PDG cache used during interprocedural slicing.
 struct PdgCache(RefCell<HashMap<Uuid, Arc<ProgramDependenceGraph>>>);
 
+/// Query-local reverse adjacency, built once for each visited function. A
+/// worklist step must not scan the whole PDG for every included statement.
+#[derive(Default)]
+struct DependencyPredecessors(HashMap<PdgNodeId, Vec<PdgNodeId>>);
+
+impl DependencyPredecessors {
+    fn build(pdg: &ProgramDependenceGraph) -> Self {
+        let mut index = Self::default();
+        for edge in &pdg.data_deps {
+            index.0.entry(edge.to).or_default().push(edge.from);
+        }
+        for edge in &pdg.control_deps {
+            index
+                .0
+                .entry(edge.dependent)
+                .or_default()
+                .push(edge.controller);
+        }
+        index
+    }
+}
+
 impl PdgCache {
     fn new() -> Self {
         Self(RefCell::new(HashMap::new()))
@@ -48,6 +70,7 @@ pub struct InterproceduralSlicer<'a, C: InterproceduralCfgAccess + ?Sized> {
     backend: &'a MemoryBackend,
     source_files: HashMap<String, String>,
     pdg_cache: PdgCache,
+    predecessors: RefCell<HashMap<Uuid, DependencyPredecessors>>,
     function_names: HashMap<Uuid, String>,
 }
 
@@ -69,12 +92,15 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> InterproceduralSlicer<'a, C> {
             backend,
             source_files: source_files.clone(),
             pdg_cache: PdgCache::new(),
+            predecessors: RefCell::new(HashMap::new()),
             function_names,
         })
     }
 
     /// Pre-populate PDG cache with refcount shares (no deep PDG clone).
     pub fn preload_pdgs(&self, archive: &crate::cfg_pdg_archive::CfgPdgArchive) {
+        // Replacing archived PDGs also invalidates their derived adjacency.
+        self.predecessors.borrow_mut().clear();
         let mut pdgs = self.pdg_cache.borrow_map_mut();
         for (function_id, record) in &archive.records {
             pdgs.insert(*function_id, Arc::clone(&record.pdg));
@@ -82,6 +108,11 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> InterproceduralSlicer<'a, C> {
     }
 
     /// Compute interprocedural slice starting in `function`.
+    ///
+    /// Local data and control predecessors are followed in every visited
+    /// function, including caller statements introduced by a boundary handoff.
+    /// Boundary selection remains a conservative statement-level operation;
+    /// this does not establish operand-specific actual/formal or return binding.
     pub fn slice(&self, function: Uuid, criterion: SliceCriterion) -> Result<InterproceduralSlice> {
         let pdg = self.pdg_for(function)?;
         let cfg = self
@@ -105,6 +136,20 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> InterproceduralSlicer<'a, C> {
         while let Some((current_func, current_node)) = worklist.pop_front() {
             let current_pdg = self.pdg_for(current_func)?;
             let node = &current_pdg.nodes[&current_node];
+
+            {
+                let mut indexes = self.predecessors.borrow_mut();
+                let predecessors = indexes
+                    .entry(current_func)
+                    .or_insert_with(|| DependencyPredecessors::build(current_pdg.as_ref()));
+                if let Some(incoming) = predecessors.0.get(&current_node) {
+                    for &predecessor in incoming {
+                        if slice.insert((current_func, predecessor)) {
+                            worklist.push_back((current_func, predecessor));
+                        }
+                    }
+                }
+            }
 
             for var in &node.used_vars {
                 if self.is_parameter(current_func, var) {
@@ -244,13 +289,19 @@ mod tests {
     use super::*;
     use crate::interprocedural_cfg::InterproceduralCFG;
     use rgctl_graph::backend::{GraphBackend, MemoryBackend};
-    use rgctl_graph::schema::{Edge, EdgeType, Node, NodeType};
+    use rgctl_graph::schema::{Edge, EdgeType, GraphParameter, Node, NodeType};
 
     #[test]
     fn test_interprocedural_slice_includes_caller() {
         let mut backend = MemoryBackend::new();
         let main = Node::new(NodeType::Function, "main").with_file_path("prog.rs");
-        let process = Node::new(NodeType::Function, "process").with_file_path("prog.rs");
+        let process = Node::new(NodeType::Function, "process")
+            .with_file_path("prog.rs")
+            .with_parameters(vec![GraphParameter {
+                name: "input".into(),
+                param_type: Some("String".into()),
+                default_value: None,
+            }]);
         let id_main = main.id;
         let id_process = process.id;
         backend.insert_node(main).unwrap();
@@ -299,5 +350,17 @@ fn write_output(_: String) {}
 
         assert!(slice.reduction_percent >= 0.0);
         assert!(slice.functions.contains(&id_process));
+        assert!(slice.functions.contains(&id_main));
+        let caller_pdg = slicer.pdg_for(id_main).unwrap();
+        let input_definition = caller_pdg
+            .nodes
+            .values()
+            .find(|node| node.statement.text.contains("let data = read_input()"))
+            .unwrap();
+        assert!(slice.statements.contains(&(id_main, input_definition.id)));
     }
 }
+
+#[cfg(test)]
+#[path = "interprocedural_slicing_tests.rs"]
+mod boundary_tests;
