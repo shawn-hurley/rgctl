@@ -107,3 +107,17 @@ local and invocation facts and activates supplied canonical member candidates.
 It merges caller alternatives, reports coverage gaps, and preserves transfer
 provenance. Matched-context exclusions and interprocedural taint verdicts remain
 separate work; the query cannot certify absence of impact.
+
+## Conditional results and successful assertions
+
+Conditional operands retain the condition separately and only their selected
+value branches as `inputs`. Both branches supply possible origins to the result;
+no path-condition evaluation or branch exclusion is claimed. JavaScript,
+TypeScript and Java ternaries and Python conditional expressions share this role.
+Successful Java reference casts, Go type assertions and TypeScript `as`, angle
+assertions and non-null assertions preserve the operand origin. Assertion failure
+is not an alternate object value; exception/panic effects remain separate work.
+Ordinary arithmetic and other computations are not aliases of their children.
+
+These persisted expression roles use CFG semantics 5 and RBCP v8; prior procedural
+records are invalidated by the existing archive and source-revision guards.
