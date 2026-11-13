@@ -288,9 +288,11 @@ fn recursive_boundary_worklist_reaches_a_finite_fixed_point() {
     for (name, line) in [
         ("exercise", 2),
         ("exercise", 3),
+        ("relay", 5), // formal entry definition
         ("relay", 6),
         ("relay", 7),
         ("relay", 8),
+        ("consume", 10), // formal entry definition
         ("consume", 11),
     ] {
         assert!(
@@ -298,5 +300,5 @@ fn recursive_boundary_worklist_reaches_a_finite_fixed_point() {
             "missing recursive dependency {name}:{line}: {locations:?}"
         );
     }
-    assert_eq!(locations.len(), 6);
+    assert_eq!(locations.len(), 8);
 }
