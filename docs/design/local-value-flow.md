@@ -99,3 +99,11 @@ records select a use before a definition with a deterministic ordering. This
 removes the previous arbitrary PDG-map choice between an entry and a body use.
 The new local query considers all recorded reads; it is not limited to that
 legacy helper's single representative criterion.
+
+## Possible-origin integration
+
+The [bounded possible-origin query](value-origins.md) now composes these native
+local and invocation facts and activates supplied canonical member candidates.
+It merges caller alternatives, reports coverage gaps, and preserves transfer
+provenance. Matched-context exclusions and interprocedural taint verdicts remain
+separate work; the query cannot certify absence of impact.
