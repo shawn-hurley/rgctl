@@ -161,3 +161,35 @@ Go type-switch aliases receive their incoming value in a switch-local CFG scope.
 The query keeps possible origins in all arms without claiming type-condition
 exclusions. Native positions, operand persistence and revision checks apply as to
 ordinary local assignments. This slice requires CFG semantics 8 and RBCP v11.
+
+## Callable values and bound receivers
+
+`build_with_callables` accepts `CallableCandidate` inputs at exact native values,
+with a canonical target, receiver supply and optional exact receiver/type premise.
+The query creates distinct callable-value origins, propagates them through local,
+argument, return and modeled memory transfers, and activates invocations whose
+callee expression receives them. `callable_values` and `callable_targets` retain
+the possible function and native invocation evidence. Newly activated function
+alternatives replay already reached consumers. Budgets bound inputs, callable
+bindings, evidence and work; the reverse value index is bounded by origin facts.
+
+`ReceiverSupply::BoundValue` retains a function-qualified receiver expression
+from another caller. The invocation binder validates it against native records
+and binds the target receiver formal; it does not reinterpret the receiver as an
+ordinary explicit argument. Python descriptor conventions consume the receiver
+formal as with ordinary member calls. First-argument receiver conventions skip
+that actual even when the selected function declares no receiver formal.
+
+Native ECMA `bind`, `call` and `apply` models preserve possible target reachability.
+Bound receiver alternatives merge, including the original receiver candidate.
+The current model does not qualify partial bound argument lists or apply-array
+expansion, and existing unresolved/binding evidence remains relevant. Source
+spelling of these library methods is a conservative modeling premise, not proof
+of an unmodified builtin. Member reference binding is conservative across
+languages; retaining an ECMA receiver may over-warn on an otherwise unbound use.
+
+Resolvers own lexical/name and canonical-target coverage. Possible same-file
+name candidates are not a scope-completeness proof. Fields, keys and callers
+still merge as documented. Captures, decorators, arbitrary descriptors,
+reflection, scheduling and interprocedural taint need separate models. This
+query-local extension does not change procedural persistence or CFG revisions.
