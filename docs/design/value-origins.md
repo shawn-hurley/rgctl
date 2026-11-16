@@ -236,3 +236,13 @@ conservative premises. Arbitrary proxies, monkey patching, module initialization
 reflection and property descriptor effects are not qualified by these models.
 Constructor pools/evidence and work use the existing query limits. Computed call
 receivers now persist explicitly, requiring CFG semantics 10 and RBCP v13.
+
+## External environments
+
+[Declaration-qualified environment flow](environment-flow.md) now supplies native
+module/lexical/captured bindings and implicit Java member loads. Use
+`build_with_environment` with canonical `OriginInputs` and native environment
+facts. Source module linking and callable-definition values reuse the same
+transfer and callable machinery. This does not qualify arbitrary dynamic imports,
+closure-instance exclusions, generated/implicit invocations or scalar impact
+paths beyond the adapter's current callable-target consumer. Coverage stays partial.

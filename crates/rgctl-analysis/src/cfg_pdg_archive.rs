@@ -18,7 +18,8 @@
 //! - **v10**: aggregate identities and element stores/loads.
 //! - **v11**: projected multi-value assignment operands.
 //! - **v12**: deferred value, yield and channel operands.
-//! - **v13** (current): computed invocation receiver semantics.
+//! - **v13**: computed invocation receiver semantics.
+//! - **v14** (current): module records and literal/member operand roles.
 
 use crate::cfg::ControlFlowGraph;
 use crate::hash_maps::FxHashMap;
@@ -37,8 +38,8 @@ use uuid::Uuid;
 
 /// Magic bytes for CFG/PDG archive files (`RBCP`).
 pub const ARCHIVE_MAGIC: [u8; 4] = *b"RBCP";
-/// Current archive format (v13 = computed invocation receivers).
-pub const ARCHIVE_VERSION: u32 = 13;
+/// Current archive format (v14 = module and literal roles).
+pub const ARCHIVE_VERSION: u32 = 14;
 /// Legacy monolithic bincode payload.
 pub const ARCHIVE_VERSION_V1: u32 = 1;
 /// Legacy header-TOC format.

@@ -18,6 +18,8 @@ pub enum LocalTransferKind {
     LocalRead,
     /// Parentheses preserve their inner value.
     Parenthesized,
+    /// Generic arguments retain the nominal constructor/type value of the head.
+    TypeApplication,
     /// Either selected branch may supply the conditional result.
     ConditionalAlternative,
     /// A successful await exposes a possible resolved result, conservatively.
@@ -251,6 +253,21 @@ impl LocalValueFlow {
             }
         }
         for (index, expression) in cfg.operands.expressions.iter().enumerate() {
+            if let ExpressionKind::TypeApplication(from) = expression.kind {
+                let edge = LocalValueTransfer {
+                    from,
+                    to: ExpressionId(index as u32),
+                    kind: LocalTransferKind::TypeApplication,
+                };
+                if seen.insert(edge) {
+                    if result.transfers.len() >= limits.max_transfers {
+                        emit_diagnostic(LocalFlowDiagnostic::LimitReached);
+                        return result;
+                    }
+                    result.transfers.push(edge);
+                }
+                continue;
+            }
             let kind = match expression.kind {
                 ExpressionKind::Parenthesized => LocalTransferKind::Parenthesized,
                 ExpressionKind::Conditional { .. } => LocalTransferKind::ConditionalAlternative,

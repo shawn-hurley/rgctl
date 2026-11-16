@@ -4,6 +4,7 @@ use crate::call_bindings::{
     BindingDiagnostic, BindingSource, CallBindings, CallRef, InvocationTarget, ReceiverSupply,
     TransferKind, ValueRef,
 };
+use crate::environment::{EnvironmentBinding, EnvironmentDiagnostic, EnvironmentFacts};
 use crate::interprocedural_cfg::InterproceduralCfgAccess;
 use crate::local_value_flow::{
     LocalFlowDiagnostic, LocalFlowLimits, LocalTransferKind, LocalValueFlow,
@@ -74,6 +75,11 @@ pub struct ReceiverTarget {
 pub enum OriginTransferCause {
     /// Native scoped local transfer.
     Local(LocalTransferKind),
+    /// A store and read resolve to the same owning declaration/environment.
+    Environment {
+        /// Canonical declaration, not a global name match.
+        binding: EnvironmentBinding,
+    },
     /// A modeled deferred runner exposes the possible result of its argument.
     DeferredCall {
         /// Exact native runner invocation; builtin source spelling is conservative.
@@ -122,6 +128,8 @@ pub enum OriginContextPolicy {
 pub enum OriginDiagnostic {
     /// Missing procedural record.
     MissingFunction(Uuid),
+    /// Native environment indexing/linking coverage evidence.
+    Environment(EnvironmentDiagnostic),
     /// Invalid source-local expression or invocation reference.
     InvalidValue(ValueRef),
     /// Invalid invocation reference supplied by candidate resolution.
@@ -223,6 +231,20 @@ pub struct OriginAnalysis {
     /// Caller contexts are explicitly merged in this first conservative solver.
     pub context_policy: OriginContextPolicy,
 }
+/// Canonical resolver inputs, separate from native environment transfer facts.
+#[derive(Default)]
+pub struct OriginInputs<'a> {
+    /// Typed/opaque possible producers.
+    pub seeds: &'a [OriginSeed],
+    /// Initially selected source invocations.
+    pub targets: &'a [InvocationTarget],
+    /// Canonical compatible member targets.
+    pub members: &'a [MemberCandidate],
+    /// Possible function values.
+    pub callables: &'a [CallableCandidate],
+    /// Possible constructor values.
+    pub constructors: &'a [ConstructorCandidate],
+}
 impl OriginAnalysis {
     /// Find origins without exposing an invalidatable memoized range.
     pub fn origins(&self, value: ValueRef) -> &[OriginId] {
@@ -266,15 +288,74 @@ impl OriginAnalysis {
         constructors: &[ConstructorCandidate],
         limits: OriginLimits,
     ) -> Self {
+        Self::build_with_environment(
+            icfg,
+            OriginInputs {
+                seeds,
+                targets,
+                members,
+                callables,
+                constructors,
+            },
+            &EnvironmentFacts::default(),
+            limits,
+        )
+    }
+    /// Compose declaration-qualified external state with local/call/memory flow.
+    pub fn build_with_environment<C: InterproceduralCfgAccess + ?Sized>(
+        icfg: &C,
+        inputs: OriginInputs<'_>,
+        environment: &EnvironmentFacts,
+        limits: OriginLimits,
+    ) -> Self {
+        let OriginInputs {
+            seeds,
+            targets,
+            members,
+            callables,
+            constructors,
+        } = inputs;
         let mut query = Query::new(icfg, limits);
         if seeds.len() > limits.max_facts
             || targets.len() > limits.max_targets
             || members.len() > limits.max_member_candidates
             || callables.len() > limits.max_member_candidates
             || constructors.len() > limits.max_member_candidates
+            || environment.transfers.len() > limits.max_transfers
+            || environment.member_reads.len() > limits.max_transfers
+            || environment.diagnostics.len() > limits.max_facts
         {
             query.limit();
             return query.finish();
+        }
+        for diagnostic in &environment.diagnostics {
+            query.diagnostic(OriginDiagnostic::Environment(diagnostic.clone()));
+        }
+        for transfer in &environment.transfers {
+            query.load(transfer.from.function);
+            query.load(transfer.to.function);
+            query.edge(
+                transfer.from,
+                transfer.to,
+                OriginTransferCause::Environment {
+                    binding: transfer.binding,
+                },
+            );
+            if query.limited {
+                break;
+            }
+        }
+        for read in &environment.member_reads {
+            query.load(read.receiver.function);
+            query.load(read.value.function);
+            if !query.valid(read.receiver) || !query.valid(read.value) {
+                query.diagnostic(OriginDiagnostic::InvalidValue(read.value));
+                continue;
+            }
+            query.field_access(read.receiver, &read.member, read.value, false);
+            if query.limited {
+                break;
+            }
         }
         let mut ordered_members = members.to_vec();
         ordered_members.sort_by_key(|m| (target_key(m.target), m.receiver_type));

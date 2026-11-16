@@ -27,7 +27,7 @@ pub struct FormalId(pub u32);
 pub struct OperandNameId(pub u32);
 
 /// Checked, exclusive source-file byte span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OperandSpan {
     /// Inclusive start byte.
     pub start: u32,
@@ -95,6 +95,8 @@ pub enum ExpressionKind {
     Formal(FormalId),
     /// Result of one particular invocation.
     CallResult(CallSiteId),
+    /// Generic type/constructor application retaining its nominal head separately.
+    TypeApplication(ExpressionId),
     /// Non-call aggregate construction, referring to its type expression.
     Construction(ExpressionId),
     /// A literal constant.
@@ -364,7 +366,9 @@ impl FunctionOperands {
                     ExpressionKind::Name(id) | ExpressionKind::Member(id) => name(id),
                     ExpressionKind::Formal(id) => (id.0 as usize) < self.formals.len(),
                     ExpressionKind::CallResult(id) => (id.0 as usize) < self.calls.len(),
-                    ExpressionKind::Construction(id) => expr(id),
+                    ExpressionKind::Construction(id) | ExpressionKind::TypeApplication(id) => {
+                        expr(id)
+                    }
                     ExpressionKind::Conditional { condition } => expr(condition),
                     _ => true,
                 }

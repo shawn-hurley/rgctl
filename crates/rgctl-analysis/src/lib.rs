@@ -300,3 +300,6 @@ pub use wl_hash::{CanonicalEdgeTag, CanonicalStatementKind, WeisfeilerLehmanHash
 
 /// Bounded possible-type origins over native value transfers.
 pub mod value_origins;
+
+/// Declaration-qualified scope/environment transfers from cached native syntax.
+pub mod environment;

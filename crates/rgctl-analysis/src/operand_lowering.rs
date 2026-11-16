@@ -81,7 +81,9 @@ pub(crate) fn lower_function_operands(
     let mut stack = vec![body];
     while let Some(node) = stack.pop() {
         if lowerer.is_callable_boundary(node) {
-            lowerer.diagnostic(node, OperandDiagnosticKind::NestedCallable)?;
+            // Keep the creation/definition value in its enclosing procedure;
+            // the body is still lowered independently in its own CFG.
+            lowerer.expression(node, 0)?;
             continue;
         }
         if language == OperandLanguage::Go
@@ -581,6 +583,7 @@ impl<'a> Lowerer<'a> {
                 | "type_identifier"
                 | "property_identifier"
                 | "field_identifier"
+                | "shorthand_property_identifier"
         ) {
             ExpressionKind::Name(self.node_name(node)?)
         } else if matches!(kind, "await" | "await_expression") {
@@ -599,13 +602,24 @@ impl<'a> Lowerer<'a> {
         {
             inputs.push(self.expression(value, depth + 1)?);
             ExpressionKind::Element
+        } else if kind == "generic_type"
+            && let Some(head) = node.named_child(0)
+        {
+            let head = self.expression(head, depth + 1)?;
+            for child in children(node) {
+                inputs.push(self.expression(child, depth + 1)?);
+            }
+            ExpressionKind::TypeApplication(head)
         } else if let Some(base) = element_base(node) {
             inputs.push(self.expression(base, depth + 1)?);
             for child in children(node).into_iter().filter(|n| n.id() != base.id()) {
                 inputs.push(self.expression(child, depth + 1)?);
             }
             ExpressionKind::Element
-        } else if matches!(kind, "array" | "list" | "tuple" | "dictionary" | "set") {
+        } else if matches!(
+            kind,
+            "array" | "object" | "list" | "tuple" | "dictionary" | "set"
+        ) {
             for child in children(node) {
                 let value = if matches!(child.kind(), "pair" | "key_value_pair") {
                     child.child_by_field_name("value")
@@ -862,7 +876,11 @@ impl<'a> Lowerer<'a> {
 fn member_parts(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     if !matches!(
         node.kind(),
-        "member_expression" | "attribute" | "selector_expression" | "field_expression"
+        "member_expression"
+            | "attribute"
+            | "selector_expression"
+            | "field_expression"
+            | "field_access"
     ) {
         return None;
     }

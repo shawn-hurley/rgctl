@@ -358,6 +358,22 @@ impl ParsedSourceFile {
         })
     }
 
+    /// Lower module/package initialization using this cached native tree.
+    /// Callable/class bodies remain separate procedures and are not executed here.
+    pub fn build_module_cfg(&self, language: &str, source: &[u8]) -> Result<ControlFlowGraph> {
+        let root = self.tree.root_node();
+        let mut cfg = ControlFlowGraph::new();
+        cfg.operands = crate::operands::lower_function_operands(language, root, root, source)?;
+        let mut builder = CfgBuilder::new(&mut cfg, language);
+        builder.module_mode = true;
+        builder.visit_block(root, source)?;
+        if builder.cfg.exits.is_empty() {
+            builder.cfg.exits.push(builder.current_block);
+        }
+        builder.cfg.prune_unreachable_blocks();
+        Ok(cfg)
+    }
+
     /// Borrow the cached tree-sitter [`Tree`].
     pub fn tree(&self) -> &Tree {
         &self.tree
@@ -898,6 +914,7 @@ struct CfgBuilder<'a> {
     expr_walk_depth_warned: bool,
     /// Lexical block frames: bare local name → scoped id (`x` or `x#N`).
     scope_frames: Vec<HashMap<String, String>>,
+    module_mode: bool,
     /// Monotonic id for shadowed locals (`x#1`, `x#2`, …).
     next_shadow_id: u32,
     /// Set after the function-body block has been entered (nested blocks push frames).
@@ -945,6 +962,7 @@ impl<'a> CfgBuilder<'a> {
             pending_exception_edges: HashSet::new(),
             expr_walk_depth_warned: false,
             scope_frames: vec![HashMap::new()],
+            module_mode: false,
             next_shadow_id: 1,
             block_scope_entered: false,
             operand_anchors,
@@ -1213,6 +1231,19 @@ impl<'a> CfgBuilder<'a> {
     }
 
     fn visit_statement(&mut self, node: Node, source: &[u8]) -> Result<()> {
+        if self.module_mode
+            && (crate::language_profile::function_kinds_for(self.language)?.contains(&node.kind())
+                || matches!(
+                    node.kind(),
+                    "class_definition"
+                        | "class_declaration"
+                        | "interface_declaration"
+                        | "type_declaration"
+                        | "decorated_definition"
+                ))
+        {
+            return Ok(());
+        }
         if !self.flow_active {
             return Ok(());
         }
@@ -1698,6 +1729,20 @@ impl<'a> CfgBuilder<'a> {
             }
             if !self.flow_active {
                 return Ok(());
+            }
+            if self.module_mode
+                && (function_kinds_for(self.language)?.contains(&node.kind())
+                    || matches!(
+                        node.kind(),
+                        "func_literal"
+                            | "function_literal"
+                            | "lambda"
+                            | "lambda_expression"
+                            | "arrow_function"
+                            | "closure_expression"
+                    ))
+            {
+                continue;
             }
             match node.kind() {
                 "try_expression" => self.visit_try_expression(node, source)?,
@@ -4990,6 +5035,7 @@ fn is_block_like(kind: &str) -> bool {
             | "else_block" // Elixir if/else arms
             | "body" // HCL / Terraform block body
             | "program"
+            | "module"
             | "async_block"
             | "unsafe_block"
             | "subshell" // Bash `( … )`
