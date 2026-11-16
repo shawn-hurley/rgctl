@@ -565,6 +565,21 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
                 }
                 continue;
             }
+            if matches!(transfer.kind, TransferKind::ReturnToResult { .. }) && !scalar_return {
+                self.seed(OriginSeed {
+                    value: transfer.to,
+                    type_id: None,
+                });
+                if let BindingSource::Expression(from) = transfer.from {
+                    self.memory_access(transfer.to, MemoryMember::Element, from, true);
+                } else {
+                    self.diagnostic(OriginDiagnostic::ImplicitValue {
+                        target,
+                        kind: transfer.kind,
+                    });
+                }
+                continue;
+            }
             let supported =
                 matches!(
                     transfer.kind,
@@ -772,7 +787,7 @@ impl<C: InterproceduralCfgAccess + ?Sized> Query<'_, C> {
                         }
                     }
                 }
-                ExpressionKind::Element => {
+                ExpressionKind::Element | ExpressionKind::Projection { .. } => {
                     if let Some(&base) = expression
                         .inputs
                         .slice(&cfg.operands.inputs)

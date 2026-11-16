@@ -15,7 +15,8 @@
 //! - **v7**: exact local expression/statement and read/write bindings.
 //! - **v8**: typed conditional values and successful assertions.
 //! - **v9**: explicit instance-member stores.
-//! - **v10** (current): aggregate identities and element stores/loads.
+//! - **v10**: aggregate identities and element stores/loads.
+//! - **v11** (current): projected multi-value assignment operands.
 
 use crate::cfg::ControlFlowGraph;
 use crate::hash_maps::FxHashMap;
@@ -34,8 +35,8 @@ use uuid::Uuid;
 
 /// Magic bytes for CFG/PDG archive files (`RBCP`).
 pub const ARCHIVE_MAGIC: [u8; 4] = *b"RBCP";
-/// Current archive format (v10 = aggregate element operands).
-pub const ARCHIVE_VERSION: u32 = 10;
+/// Current archive format (v11 = projected assignment operands).
+pub const ARCHIVE_VERSION: u32 = 11;
 /// Legacy monolithic bincode payload.
 pub const ARCHIVE_VERSION_V1: u32 = 1;
 /// Legacy header-TOC format.

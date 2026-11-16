@@ -928,3 +928,87 @@ fn indexed_updates_preserve_container_identity_and_replay_existing_values() {
             .all(|o| output.seeds[o.0 as usize].type_id.is_none())
     );
 }
+
+#[test]
+fn multi_return_values_reach_projected_assignments_without_aliasing_the_tuple() {
+    let f = Fixture::new(
+        "go",
+        &[
+            (
+                "exercise",
+                "package demo\nfunc exercise()int{value,err:=makeValue();if err!=nil{panic(err)};return value.Execute()}",
+            ),
+            (
+                "makeValue",
+                "package demo\nfunc makeValue()(Y,error){return X{},nil}",
+            ),
+            ("Execute", "package demo\nfunc(x X)Execute()int{return 100}"),
+        ],
+    );
+    let target = f.target(0, "Execute", 2, ReceiverSupply::Member);
+    let make = f.target(0, "makeValue", 1, ReceiverSupply::None);
+    let output = OriginAnalysis::build(
+        &f.icfg,
+        &[seed(f.allocation(1, "X"), 100)],
+        &[make],
+        &[member(target, 100)],
+        Default::default(),
+    );
+    assert!(
+        output.receiver_targets.iter().any(|r| r.target == target),
+        "{output:?}"
+    );
+    assert_eq!(f.cfg(0).operands.assignment_values.len(), 2);
+    assert!(
+        output
+            .origins(ValueRef {
+                function: f.ids[0],
+                expression: f.cfg(0).operands.calls[make.call.site.0 as usize].result
+            })
+            .iter()
+            .all(|o| output.seeds[o.0 as usize].type_id.is_none())
+    );
+}
+
+#[test]
+fn type_switch_alias_retains_incoming_origins_and_stays_in_switch_scope() {
+    let f = Fixture::new(
+        "go",
+        &[
+            (
+                "exercise",
+                "package demo\nfunc exercise()int{var value any=X{};switch typed:=value.(type){case Y:return typed.Execute();default:return 0}}",
+            ),
+            ("Execute", "package demo\nfunc(x X)Execute()int{return 100}"),
+        ],
+    );
+    let target = f.target(0, "Execute", 1, ReceiverSupply::Member);
+    let output = OriginAnalysis::build(
+        &f.icfg,
+        &[seed(f.allocation(0, "X"), 100)],
+        &[],
+        &[member(target, 100)],
+        Default::default(),
+    );
+    assert!(
+        output.receiver_targets.iter().any(|r| r.target == target),
+        "{output:?}"
+    );
+    assert!(f.cfg(0).valid_local_operand_positions());
+}
+
+#[test]
+fn projection_assignments_round_trip_and_reject_bad_values() {
+    let f = Fixture::new(
+        "go",
+        &[(
+            "exercise",
+            "package demo\nfunc exercise()int{value,err:=makeValue();if err!=nil{return 0};return value.Execute()}",
+        )],
+    );
+    let mut cfg: ControlFlowGraph =
+        bincode::deserialize(&bincode::serialize(f.cfg(0)).unwrap()).unwrap();
+    assert_eq!(cfg.operands, f.cfg(0).operands);
+    cfg.operands.assignment_values[0].value = ExpressionId(u32::MAX);
+    assert!(!cfg.operands.valid_references());
+}

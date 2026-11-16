@@ -144,3 +144,20 @@ now preserves that distinction for supported indexed forms.
 Persisted aggregate operands require CFG semantics 7 and RBCP v10. Contexts and
 keys merge; no precise index exclusion, complete container API semantics,
 iteration, comprehension, or mutation-order proof is claimed.
+
+## Go multi-result assignments and type-switch aliases
+
+Native multi-value assignments now retain synthetic projected expression values
+and exact assignment-target spans. CFG write capture associates each scoped local
+with its projection. For multi-value returns, invocation bindings populate an
+opaque result aggregate; projections read its possible elements. The declared
+projection position is retained in operands, while the initial memory model
+merges return slots conservatively. A first-result X may therefore over-warn on
+a sibling slot, but the entire result tuple is never typed as X. Successful
+comma-ok assertion value position zero preserves the asserted value; the boolean
+success result does not acquire that identity through this assertion rule.
+
+Go type-switch aliases receive their incoming value in a switch-local CFG scope.
+The query keeps possible origins in all arms without claiming type-condition
+exclusions. Native positions, operand persistence and revision checks apply as to
+ordinary local assignments. This slice requires CFG semantics 8 and RBCP v11.

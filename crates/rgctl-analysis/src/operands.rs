@@ -112,6 +112,11 @@ pub enum ExpressionKind {
     Collection,
     /// Element read; first input is the container, remaining inputs are selectors.
     Element,
+    /// Assignment from a tuple-valued expression; first input is the result.
+    Projection {
+        /// Declared result position; consumers may conservatively merge slots.
+        position: u32,
+    },
     /// Other computation with ordered syntactic children.
     Computation,
     /// Unsupported, malformed or depth-limited expression.
@@ -284,6 +289,15 @@ pub struct ElementWriteFact {
     pub value: ExpressionId,
 }
 
+/// Synthetic projected value defining one native assignment target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignmentValueFact {
+    /// Exact declared/assigned identifier span.
+    pub target: OperandSpan,
+    /// Projected expression supplying this write.
+    pub value: ExpressionId,
+}
+
 /// Pooled per-function native syntax facts, persisted with the CFG.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionOperands {
@@ -315,6 +329,8 @@ pub struct FunctionOperands {
     pub field_writes: Vec<FieldWriteFact>,
     /// Explicit indexed aggregate stores.
     pub element_writes: Vec<ElementWriteFact>,
+    /// Projected RHS values for native multi-value assignments.
+    pub assignment_values: Vec<AssignmentValueFact>,
     /// Scoped native local keys, indexed by LocalSlotId.
     pub local_slots: Vec<OperandNameId>,
     /// Exact local read occurrences and CFG positions.
@@ -347,9 +363,13 @@ impl FunctionOperands {
                     _ => true,
                 }
         }) && self
-            .element_writes
+            .assignment_values
             .iter()
-            .all(|w| expr(w.container) && expr(w.value))
+            .all(|a| a.target.start < a.target.end && expr(a.value))
+            && self
+                .element_writes
+                .iter()
+                .all(|w| expr(w.container) && expr(w.value))
             && self
                 .field_writes
                 .iter()
