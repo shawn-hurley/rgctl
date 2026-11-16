@@ -211,3 +211,28 @@ remains relevant. Delegating yields, arbitrary event loops, promises, channel
 iteration/close behavior and library-specific deferred APIs need further models.
 Resolved-value abstraction cannot establish precise coroutine/object identity or
 absence of execution effects. New operands use CFG semantics 9 and RBCP v12.
+
+## Computed lookup and constructor values
+
+`callable_member_values` enumerates native named/indexed member values and the
+conservative Python `getattr` convention for a resolver. Unknown selector keys
+retain all compatible canonical methods; receiver origins still gate instance
+candidates. These candidates feed the same callable-value engine rather than a
+separate global method-name call graph. This is not a complete descriptor or
+reflection model, and may warn on methods the actual key never selects.
+
+`build_with_values` also accepts `ConstructorCandidate` inputs at exact native
+class/type references. Opaque constructor-value origins flow through local,
+argument, return and memory transfers. Invoking a reached constructor introduces
+a canonical possible instance type on the result and, when supplied, binds its
+explicit constructor body with a constructed receiver. Constructor-value and
+construction evidence are retained separately from ordinary function values.
+A missing explicit body does not cause an invented implementation to be called.
+
+The native ECMA `Object.create(Type.prototype)` convention creates a possible
+instance type from a reached constructor reference, without invoking its
+constructor body. Source spelling and resolver alias/type candidates remain
+conservative premises. Arbitrary proxies, monkey patching, module initialization,
+reflection and property descriptor effects are not qualified by these models.
+Constructor pools/evidence and work use the existing query limits. Computed call
+receivers now persist explicitly, requiring CFG semantics 10 and RBCP v13.

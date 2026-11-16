@@ -763,11 +763,14 @@ impl<'a> Lowerer<'a> {
             .or_else(|| node.child_by_field_name("constructor"))
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| node.child_by_field_name("type"));
-        let receiver_node = node.child_by_field_name("object").or_else(|| {
-            callee_node
-                .and_then(member_parts)
-                .map(|(receiver, _)| receiver)
-        });
+        let receiver_node = node
+            .child_by_field_name("object")
+            .or_else(|| {
+                callee_node
+                    .and_then(member_parts)
+                    .map(|(receiver, _)| receiver)
+            })
+            .or_else(|| callee_node.and_then(element_base));
         let receiver = receiver_node
             .map(|n| self.expression(n, depth))
             .transpose()?;

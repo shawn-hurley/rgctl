@@ -25,6 +25,14 @@ mod deferred_origins;
 use callable_origins::CallableState;
 pub use callable_origins::{CallableCandidate, CallableValue, OriginRequirement};
 
+#[path = "lookup_origins.rs"]
+mod lookup_origins;
+use lookup_origins::LookupState;
+pub use lookup_origins::{
+    CallableMemberValue, ConstructionEvidence, ConstructorCandidate, ConstructorValue,
+    callable_member_values,
+};
+
 /// Dense query-local origin index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OriginId(pub u32);
@@ -204,6 +212,10 @@ pub struct OriginAnalysis {
     pub callable_values: Vec<CallableValue>,
     /// Canonical invocations activated by reaching callable values.
     pub callable_targets: Vec<ReceiverTarget>,
+    /// Canonical possible constructor values carried through native transfers.
+    pub constructor_values: Vec<ConstructorValue>,
+    /// Native results supported by constructor/prototype-value origins.
+    pub construction_evidence: Vec<ConstructionEvidence>,
     /// Native value-transfer explanations.
     pub transfers: Vec<OriginTransfer>,
     /// Partial/unknown/limit evidence.
@@ -242,11 +254,24 @@ impl OriginAnalysis {
         callables: &[CallableCandidate],
         limits: OriginLimits,
     ) -> Self {
+        Self::build_with_values(icfg, seeds, targets, members, callables, &[], limits)
+    }
+    /// Include canonical constructor values as well as function and instance values.
+    pub fn build_with_values<C: InterproceduralCfgAccess + ?Sized>(
+        icfg: &C,
+        seeds: &[OriginSeed],
+        targets: &[InvocationTarget],
+        members: &[MemberCandidate],
+        callables: &[CallableCandidate],
+        constructors: &[ConstructorCandidate],
+        limits: OriginLimits,
+    ) -> Self {
         let mut query = Query::new(icfg, limits);
         if seeds.len() > limits.max_facts
             || targets.len() > limits.max_targets
             || members.len() > limits.max_member_candidates
             || callables.len() > limits.max_member_candidates
+            || constructors.len() > limits.max_member_candidates
         {
             query.limit();
             return query.finish();
@@ -264,6 +289,15 @@ impl OriginAnalysis {
                 continue;
             }
             query.members.entry(call).or_default().push(member);
+        }
+        let mut ordered_constructors = constructors.to_vec();
+        ordered_constructors
+            .sort_by_key(|c| (c.value.function, c.value.expression.0, c.type_id, c.callee));
+        for candidate in ordered_constructors {
+            query.constructor_candidate(candidate);
+            if query.limited {
+                break;
+            }
         }
         let mut ordered_callables = callables.to_vec();
         ordered_callables.sort_by_key(|c| {
@@ -340,6 +374,7 @@ struct Query<'a, C: InterproceduralCfgAccess + ?Sized> {
     queue: VecDeque<(ValueRef, OriginId)>,
     seed_ids: HashMap<OriginSeed, OriginId>,
     callables: CallableState,
+    lookup: LookupState,
     field_names: HashMap<String, u32>,
     field_accesses: HashMap<ValueRef, Vec<FieldAccess>>,
     field_stores: HashMap<(OriginId, MemoryMember), HashSet<ValueRef>>,
@@ -362,6 +397,8 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
                 receiver_targets: vec![],
                 callable_values: vec![],
                 callable_targets: vec![],
+                constructor_values: vec![],
+                construction_evidence: vec![],
                 transfers: vec![],
                 diagnostics: vec![],
                 context_policy: OriginContextPolicy::MergedPossibleOrigins,
@@ -378,6 +415,7 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
             queue: VecDeque::new(),
             seed_ids: HashMap::new(),
             callables: CallableState::default(),
+            lookup: LookupState::default(),
             field_names: HashMap::new(),
             field_accesses: HashMap::new(),
             field_stores: HashMap::new(),
@@ -468,6 +506,7 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
             }
         }
         self.register_callable_calls(function);
+        self.register_lookups(function);
         self.register_fields(function);
         self.register_deferred(function);
         let Ok(pdg) = ProgramDependenceGraph::build(cfg, b"") else {
@@ -687,6 +726,7 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
                 self.fact(to, origin);
             }
             self.callable_fact(value, origin);
+            self.lookup_fact(value, origin);
             let accesses = self.field_accesses.get(&value).cloned().unwrap_or_default();
             for access in accesses {
                 self.bind_field(access, origin)
@@ -771,6 +811,17 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
         self.output
             .callable_targets
             .sort_by_key(|r| (target_key(r.target), r.origin.0));
+        self.output
+            .constructor_values
+            .sort_by_key(|c| (c.origin.0, c.type_id, c.callee));
+        self.output.construction_evidence.sort_by_key(|e| {
+            (
+                e.value.function,
+                e.value.expression.0,
+                e.origin.0,
+                e.type_id,
+            )
+        });
         self.output.transfers.sort_by_key(|e| {
             (
                 e.from.function,
