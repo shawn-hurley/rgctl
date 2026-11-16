@@ -20,6 +20,8 @@ mod tests;
 
 #[path = "callable_origins.rs"]
 mod callable_origins;
+#[path = "deferred_origins.rs"]
+mod deferred_origins;
 use callable_origins::CallableState;
 pub use callable_origins::{CallableCandidate, CallableValue, OriginRequirement};
 
@@ -64,6 +66,11 @@ pub struct ReceiverTarget {
 pub enum OriginTransferCause {
     /// Native scoped local transfer.
     Local(LocalTransferKind),
+    /// A modeled deferred runner exposes the possible result of its argument.
+    DeferredCall {
+        /// Exact native runner invocation; builtin source spelling is conservative.
+        call: CallRef,
+    },
     /// A possible stored element reaches an indexed read on the same aggregate.
     Element {
         /// Opaque aggregate or object origin, distinct from the stored value.
@@ -462,6 +469,7 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
         }
         self.register_callable_calls(function);
         self.register_fields(function);
+        self.register_deferred(function);
         let Ok(pdg) = ProgramDependenceGraph::build(cfg, b"") else {
             self.diagnostic(OriginDiagnostic::MissingFunction(function));
             return;
@@ -579,6 +587,7 @@ impl<'a, C: InterproceduralCfgAccess + ?Sized> Query<'a, C> {
         if self.limited {
             return;
         }
+        self.bind_yields(target);
         let Ok(binding) = self.bindings.bind(target) else {
             self.diagnostic(OriginDiagnostic::BindingError(target));
             return;

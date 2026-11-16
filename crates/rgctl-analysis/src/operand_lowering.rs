@@ -142,6 +142,28 @@ pub(crate) fn lower_function_operands(
                 }
             }
         }
+        if language == OperandLanguage::Go
+            && node.kind() == "send_statement"
+            && let (Some(channel), Some(value)) = (
+                node.child_by_field_name("channel"),
+                node.child_by_field_name("value"),
+            )
+        {
+            let container = lowerer.expression(channel, 0)?;
+            let value = lowerer.expression(value, 0)?;
+            lowerer
+                .facts
+                .element_writes
+                .push(ElementWriteFact { container, value });
+        }
+        if language == OperandLanguage::Python && node.kind() == "yield" {
+            if node.children(&mut node.walk()).any(|n| n.kind() == "from") {
+                lowerer.diagnostic(node, OperandDiagnosticKind::ReturnConvention)?;
+            } else if let Some(value) = node.named_child(0) {
+                let value = lowerer.expression(value, 0)?;
+                lowerer.facts.yields.push(value);
+            }
+        }
         if let Some(condition) = node.child_by_field_name("condition") {
             lowerer.expression(condition, 0)?;
         }
@@ -561,6 +583,22 @@ impl<'a> Lowerer<'a> {
                 | "field_identifier"
         ) {
             ExpressionKind::Name(self.node_name(node)?)
+        } else if matches!(kind, "await" | "await_expression") {
+            for child in children(node) {
+                inputs.push(self.expression(child, depth + 1)?);
+            }
+            ExpressionKind::AwaitedValue
+        } else if self.facts.language == OperandLanguage::Go && kind == "channel_type" {
+            ExpressionKind::ChannelType
+        } else if self.facts.language == OperandLanguage::Go
+            && kind == "unary_expression"
+            && node
+                .child_by_field_name("operator")
+                .is_some_and(|n| n.kind() == "<-")
+            && let Some(value) = node.child_by_field_name("operand")
+        {
+            inputs.push(self.expression(value, depth + 1)?);
+            ExpressionKind::Element
         } else if let Some(base) = element_base(node) {
             inputs.push(self.expression(base, depth + 1)?);
             for child in children(node).into_iter().filter(|n| n.id() != base.id()) {

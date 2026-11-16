@@ -117,6 +117,10 @@ pub enum ExpressionKind {
         /// Declared result position; consumers may conservatively merge slots.
         position: u32,
     },
+    /// Successful await exposes a possible resolved value from its operand.
+    AwaitedValue,
+    /// A Go channel type operand used by native make allocation modeling.
+    ChannelType,
     /// Other computation with ordered syntactic children.
     Computation,
     /// Unsupported, malformed or depth-limited expression.
@@ -331,6 +335,8 @@ pub struct FunctionOperands {
     pub element_writes: Vec<ElementWriteFact>,
     /// Projected RHS values for native multi-value assignments.
     pub assignment_values: Vec<AssignmentValueFact>,
+    /// Explicit yielded values; delegated/implicit yields remain unsupported.
+    pub yields: Vec<ExpressionId>,
     /// Scoped native local keys, indexed by LocalSlotId.
     pub local_slots: Vec<OperandNameId>,
     /// Exact local read occurrences and CFG positions.
@@ -362,10 +368,11 @@ impl FunctionOperands {
                     ExpressionKind::Conditional { condition } => expr(condition),
                     _ => true,
                 }
-        }) && self
-            .assignment_values
-            .iter()
-            .all(|a| a.target.start < a.target.end && expr(a.value))
+        }) && self.yields.iter().all(|&value| expr(value))
+            && self
+                .assignment_values
+                .iter()
+                .all(|a| a.target.start < a.target.end && expr(a.value))
             && self
                 .element_writes
                 .iter()

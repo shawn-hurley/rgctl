@@ -20,6 +20,8 @@ pub enum LocalTransferKind {
     Parenthesized,
     /// Either selected branch may supply the conditional result.
     ConditionalAlternative,
+    /// A successful await exposes a possible resolved result, conservatively.
+    AwaitedValue,
     /// Reference cast/assertion preserves its operand on the successful path.
     AssertedValue,
 }
@@ -253,6 +255,7 @@ impl LocalValueFlow {
                 ExpressionKind::Parenthesized => LocalTransferKind::Parenthesized,
                 ExpressionKind::Conditional { .. } => LocalTransferKind::ConditionalAlternative,
                 ExpressionKind::AssertedValue => LocalTransferKind::AssertedValue,
+                ExpressionKind::AwaitedValue => LocalTransferKind::AwaitedValue,
                 ExpressionKind::Projection { position: 0 }
                     if expression
                         .inputs

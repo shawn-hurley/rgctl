@@ -193,3 +193,21 @@ name candidates are not a scope-completeness proof. Fields, keys and callers
 still merge as documented. Captures, decorators, arbitrary descriptors,
 reflection, scheduling and interprocedural taint need separate models. This
 query-local extension does not change procedural persistence or CFG revisions.
+
+## Explicit deferred values
+
+Native awaited-value operands retain possible resolved origins. Python explicit
+yields populate an opaque invocation-result aggregate, and the conservative
+`next` model reads its possible elements. `asyncio.run` exposes possible values
+from its coroutine argument. Go channel construction has an opaque identity;
+sends store possible elements and receives read them. Shared element slots retain
+all alternatives without claiming ordering, scheduling, successful delivery,
+termination or race freedom. A channel is not typed as one of its elements.
+
+These models use native operands; supported library calls are recognized by
+source spelling and language, which is a conservative premise rather than proof
+of an unshadowed/unmodified builtin. Existing unresolved-call and binding evidence
+remains relevant. Delegating yields, arbitrary event loops, promises, channel
+iteration/close behavior and library-specific deferred APIs need further models.
+Resolved-value abstraction cannot establish precise coroutine/object identity or
+absence of execution effects. New operands use CFG semantics 9 and RBCP v12.
