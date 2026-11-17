@@ -32,6 +32,7 @@ const HANDLED_KINDS: &[(&str, HandlerMask)] = &[
     ("for_clause", HandlerMask::CFG_STMT),
     ("for_statement", HandlerMask::CFG_STMT),
     ("function_declaration", HandlerMask::SYMBOL),
+    ("func_literal", HandlerMask::SYMBOL),
     ("go_statement", HandlerMask::CFG_STMT),
     ("goto_statement", HandlerMask::CFG_STMT),
     ("if_statement", HandlerMask::CFG_STMT),
@@ -178,6 +179,7 @@ pub fn extract_all_single_pass(
     let root = tree.root_node();
     let file_path_str = file_path.to_string_lossy();
     let dispatch = go_dispatch();
+    let literal_names = rgctl_plugin_helpers::go::literal_names(root);
 
     let mut ctx = SinglePassCtx::new(dispatch);
     let mut relations = Vec::new();
@@ -245,8 +247,13 @@ pub fn extract_all_single_pass(
                         ctx.symbols
                             .extend(plugin.extract_vars(node, source, &file_path_str)?);
                     }
-                    "function_declaration" | "method_declaration" => {
-                        let mut func = plugin.extract_function(node, source, &file_path_str)?;
+                    "function_declaration" | "method_declaration" | "func_literal" => {
+                        let mut func = plugin.extract_function(
+                            node,
+                            source,
+                            &file_path_str,
+                            literal_names.get(&node.id()).map(String::as_str),
+                        )?;
                         if let Some(tp) = plugin.type_params_of(node, source) {
                             func.metadata["type_params"] = serde_json::Value::String(tp);
                         }

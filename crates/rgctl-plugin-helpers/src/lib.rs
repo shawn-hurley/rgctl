@@ -4,6 +4,7 @@ pub mod callable_identity;
 pub mod complexity;
 pub mod ecmascript;
 pub mod framework;
+pub mod go;
 pub mod green_cst;
 pub mod java;
 pub mod python;

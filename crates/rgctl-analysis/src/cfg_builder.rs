@@ -593,13 +593,21 @@ fn collect_function_locations(
     language: &str,
     out: &mut FunctionLocationIndex,
 ) {
+    let literal_names = if language == "go" {
+        rgctl_plugin_helpers::go::literal_names(root)
+    } else {
+        HashMap::new()
+    };
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         if !(language == "java" && node.kind() == "static_initializer")
             && (function_kinds.contains(&node.kind())
                 || (language == "java"
                     && rgctl_plugin_helpers::java::initialization_name(node).is_some()))
-            && let Some(func_name) = callable_name_for_cfg(node, source, language)
+            && let Some(func_name) = literal_names
+                .get(&node.id())
+                .cloned()
+                .or_else(|| callable_name_for_cfg(node, source, language))
         {
             let loc = FunctionLocation {
                 start_byte: node.start_byte(),
@@ -1109,7 +1117,14 @@ impl<'a> CfgBuilder<'a> {
                 line: func_node.start_position().row + 1,
                 message: "Function has no body".to_string(),
             })?;
-        self.visit_block(body, source)?;
+        if self.language == "java"
+            && func_node.kind() == "lambda_expression"
+            && !is_block_like(body.kind())
+        {
+            self.visit_statement(body, source)?;
+        } else {
+            self.visit_block(body, source)?;
+        }
         if self.flow_active {
             if !self.defer_stack.is_empty() {
                 self.unwind_defers_to_exit(CfgEdgeType::Return);

@@ -611,3 +611,103 @@ fn java_static_fields_link_across_files_without_receiver_objects() {
             .any(|t| t.from.function == a.ids["<clinit>"] && t.to.function == b.ids["exercise"])
     );
 }
+
+#[test]
+fn java_and_go_literals_have_their_own_native_body_and_capture_links() {
+    for (language, source) in [
+        (
+            "java",
+            "class App { static int exercise(){Y value=new X(); java.util.function.IntSupplier fn=()->value.execute();return fn.getAsInt();}} class X {int execute(){return 100;}}",
+        ),
+        (
+            "go",
+            "package p\nfunc exercise()int{value:=X{};fn:=func()int{return value.Execute()};return fn()}\nfunc Execute()int{return 100}",
+        ),
+    ] {
+        let parsed = ParsedSourceFile::parse(language, source.as_bytes()).unwrap();
+        let mut stack = vec![parsed.tree().root_node()];
+        let mut found = None;
+        while let Some(n) = stack.pop() {
+            if matches!(n.kind(), "lambda_expression" | "func_literal") {
+                found = Some(n);
+                break;
+            }
+            stack.extend(children(n));
+        }
+        let literal = found.unwrap();
+        let cfg = parsed
+            .build_cfg_for_byte_range(
+                language,
+                source.as_bytes(),
+                "$lambda$0",
+                literal.start_byte(),
+                literal.end_byte(),
+            )
+            .unwrap();
+        assert_eq!(cfg.operands.span, Some(span(literal).unwrap()));
+        assert_eq!(cfg.operands.calls.len(), 1, "{language}");
+        let module = Uuid::from_u128(1000);
+        let caller = Uuid::from_u128(1001);
+        let target = Uuid::from_u128(1002);
+        let outer = parsed
+            .build_cfg(language, source.as_bytes(), "exercise")
+            .unwrap();
+        let facts = parsed
+            .environment_facts(
+                language,
+                source.as_bytes(),
+                module,
+                &[
+                    EnvironmentProcedure {
+                        id: caller,
+                        operands: &outer.operands,
+                    },
+                    EnvironmentProcedure {
+                        id: target,
+                        operands: &cfg.operands,
+                    },
+                ],
+                Default::default(),
+            )
+            .unwrap();
+        assert!(
+            facts
+                .callables
+                .iter()
+                .any(|c| c.value.function == caller && c.callee == target),
+            "{language}: {facts:?}"
+        );
+        assert!(
+            facts
+                .transfers
+                .iter()
+                .any(|t| t.from.function == caller && t.to.function == target),
+            "{language}: {facts:?}"
+        );
+        assert!(
+            !facts
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d, EnvironmentDiagnostic::MissingCallableDefinition(_))),
+            "{language}"
+        );
+    }
+}
+
+#[test]
+fn java_functional_interface_calls_reach_canonical_lambda_bodies() {
+    for allocation in ["X", "W"] {
+        let source = format!(
+            "class App {{static int exercise(){{Y value=new {allocation}();java.util.function.IntSupplier fn=()->value.execute();return fn.getAsInt();}}}} class X{{int execute(){{return 100;}}}}"
+        );
+        let f = Fixture::new("java", &source, &["exercise", "$lambda$0", "execute"]);
+        let out = f.solve();
+        assert!(
+            out.callable_targets
+                .iter()
+                .any(|t| t.target.call.caller == f.ids["exercise"]
+                    && t.target.callee == f.ids["$lambda$0"])
+        );
+        assert_eq!(f.reaches_x(), allocation == "X");
+    }
+}

@@ -127,6 +127,8 @@ pub fn containing_function<'a>(node: Node, function_symbols: &[&'a Symbol]) -> O
                 } else {
                     usize::MAX
                 },
+                std::cmp::Reverse(s.location.start_column),
+                s.location.end_column,
             )
         })
 }

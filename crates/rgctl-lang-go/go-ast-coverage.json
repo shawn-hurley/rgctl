@@ -34,7 +34,7 @@
     "float_literal": "Literal",
     "for_clause": "CfgStatement",
     "for_statement": "CfgStatement",
-    "func_literal": "Literal",
+    "func_literal": "Symbol",
     "function_declaration": "Symbol",
     "function_type": "SkipTypeToken",
     "generic_type": "SkipTypeToken",

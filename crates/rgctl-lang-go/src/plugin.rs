@@ -23,8 +23,9 @@ impl GoPlugin {
         node: Node,
         source: &[u8],
         file_path: &str,
+        literal_name: Option<&str>,
     ) -> Result<Symbol> {
-        let mut name = None;
+        let mut name = literal_name.map(str::to_owned);
         let mut parameters = Vec::new();
         let mut return_type = None;
         let mut receiver_name: Option<String> = None;
@@ -1014,7 +1015,15 @@ impl GoPlugin {
     ) -> Result<Vec<Symbol>> {
         let mut symbols = Vec::new();
         let file_path_str = file_path.to_string_lossy();
-        go_traverse_for_symbols(root, source, &file_path_str, &mut symbols, self)?;
+        let literal_names = rgctl_plugin_helpers::go::literal_names(root);
+        go_traverse_for_symbols(
+            root,
+            source,
+            &file_path_str,
+            &mut symbols,
+            self,
+            &literal_names,
+        )?;
         Ok(symbols)
     }
 
@@ -1046,6 +1055,7 @@ fn go_traverse_for_symbols(
     file_path: &str,
     symbols: &mut Vec<Symbol>,
     plugin: &GoPlugin,
+    literal_names: &std::collections::HashMap<usize, String>,
 ) -> Result<()> {
     match node.kind() {
         "type_declaration" => {
@@ -1109,8 +1119,13 @@ fn go_traverse_for_symbols(
         "const_declaration" => {
             symbols.extend(plugin.extract_consts(node, source, file_path)?);
         }
-        "function_declaration" | "method_declaration" => {
-            let mut func = plugin.extract_function(node, source, file_path)?;
+        "function_declaration" | "method_declaration" | "func_literal" => {
+            let mut func = plugin.extract_function(
+                node,
+                source,
+                file_path,
+                literal_names.get(&node.id()).map(String::as_str),
+            )?;
             if let Some(tp) = plugin.type_params_of(node, source) {
                 func.metadata["type_params"] = serde_json::Value::String(tp);
             }
@@ -1121,7 +1136,7 @@ fn go_traverse_for_symbols(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        go_traverse_for_symbols(child, source, file_path, symbols, plugin)?;
+        go_traverse_for_symbols(child, source, file_path, symbols, plugin, literal_names)?;
     }
 
     Ok(())
@@ -1140,6 +1155,10 @@ impl LanguagePlugin for GoPlugin {
 
     fn file_extensions(&self) -> Vec<&str> {
         vec!["go"]
+    }
+
+    fn cache_fingerprint(&self) -> Option<&[u8]> {
+        Some(b"go-native-function-literals-v1")
     }
 
     fn grammar(&self) -> Option<tree_sitter::Language> {
@@ -1638,5 +1657,48 @@ mod cri_promote {
             qns.iter().any(|q| q == "PodSandboxManager.RunPodSandbox"),
             "{qns:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod function_literal_tests {
+    use super::*;
+    #[test]
+    fn literals_are_canonical_callable_bodies_in_both_extraction_apis() {
+        let p = GoPlugin::new().unwrap();
+        let source=b"package demo\nfunc outer(){a:=func(){\n target()\n };b:=func(){target()};a();b()}\nfunc other(){a:=func(){target()};a()}\nfunc target(){}";
+        let file = Path::new("main.go");
+        let all = p.extract_all(file, source).unwrap();
+        let split = p.extract_symbols(file, source).unwrap();
+        let relations = p.extract_relations(file, source, &split).unwrap();
+        for symbols in [&all.symbols, &split] {
+            let names: std::collections::HashSet<_> = symbols
+                .iter()
+                .filter(|s| s.name.starts_with("$lambda$"))
+                .map(|s| s.qualified_name.as_deref().unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                std::collections::HashSet::from([
+                    "demo.outer.$lambda$0",
+                    "demo.outer.$lambda$1",
+                    "demo.other.$lambda$0"
+                ])
+            );
+        }
+        for relations in [&all.relations, &relations] {
+            for owner in [
+                "demo.outer.$lambda$0",
+                "demo.outer.$lambda$1",
+                "demo.other.$lambda$0",
+            ] {
+                assert!(
+                    relations
+                        .iter()
+                        .any(|r| r.from == owner && r.to.ends_with("target")),
+                    "{owner}: {relations:?}"
+                );
+            }
+        }
     }
 }

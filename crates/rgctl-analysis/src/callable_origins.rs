@@ -156,6 +156,18 @@ impl<C: InterproceduralCfgAccess + ?Sized> Query<'_, C> {
                 })
                 .or_default()
                 .push(site);
+            if cfg.operands.language == OperandLanguage::Java
+                && let Some(receiver) = call.receiver
+            {
+                self.callables
+                    .invocations
+                    .entry(ValueRef {
+                        function,
+                        expression: receiver,
+                    })
+                    .or_default()
+                    .push(site);
+            }
             if matches!(
                 cfg.operands.language,
                 OperandLanguage::JavaScript | OperandLanguage::TypeScript
