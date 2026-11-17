@@ -165,7 +165,9 @@ pub fn extract_all_single_pass(
                 }
 
                 let mask = rgctl_plugin_api::dispatch_lookup_tracked(dispatch, node.kind_id());
-                if mask.is_passive() {
+                if mask.is_passive()
+                    && !matches!(node.kind(), "class_body" | "interface_body" | "enum_body")
+                {
                     for i in (0..node.child_count()).rev() {
                         if let Some(child) = node.child(i) {
                             stack.push(Visit::Pre(child, depth + 1));
@@ -203,25 +205,14 @@ pub fn extract_all_single_pass(
                         enter_function_scope(&mut ctx, node, sym, ScopeKind::Function);
                         pushed_scope = true;
                     }
-                    "static_initializer" => {
-                        let sym = plugin.extract_static_initializer(
+                    "class_body" | "interface_body" | "enum_body" => {
+                        plugin.push_initialization_symbols(
                             node,
                             source,
                             &file_path_str,
                             &extract_ctx,
+                            &mut ctx.symbols,
                         )?;
-                        enter_function_scope(&mut ctx, node, sym, ScopeKind::Function);
-                        pushed_scope = true;
-                    }
-                    "block" if node.parent().map(|p| p.kind()) == Some("class_body") => {
-                        let sym = plugin.extract_instance_initializer(
-                            node,
-                            source,
-                            &file_path_str,
-                            &extract_ctx,
-                        )?;
-                        enter_function_scope(&mut ctx, node, sym, ScopeKind::Function);
-                        pushed_scope = true;
                     }
                     "class_declaration" => {
                         let sym = plugin.extract_type(

@@ -483,3 +483,131 @@ fn generic_type_arguments_do_not_replace_the_constructor_head() {
             .any(|e| e.type_id == Uuid::from_u128(102))
     );
 }
+
+#[test]
+fn java_static_initializer_produces_bare_and_qualified_reads() {
+    for read in ["selected", "App.selected", "this.selected"] {
+        let source = format!(
+            "class App {{ static Y selected=new X(); int exercise(){{return {read}.execute();}} }} class X {{int execute(){{return 100;}}}}"
+        );
+        let f = Fixture::new("java", &source, &["<clinit>", "exercise", "execute"]);
+        assert!(f.facts.transfers.iter().any(|t| t.from.function==f.ids["<clinit>"] && t.to.function==f.ids["exercise"]),"{read}: {:?}",f.facts.diagnostics);
+        assert!(f.cfgs[&f.ids["<clinit>"]].operands.diagnostics.is_empty());
+        assert!(f.reaches_x(), "{read}");
+    }
+}
+#[test]
+fn java_static_initializers_merge_later_bare_and_qualified_assignments() {
+    for assignment in ["selected=new X()", "App.selected=new X()"] {
+        let source = format!(
+            "class App {{ static Y selected=new W(); static void update(){{{assignment};}} static int exercise(){{return selected.execute();}} }} class X {{int execute(){{return 100;}}}}"
+        );
+        let f = Fixture::new(
+            "java",
+            &source,
+            &["<clinit>", "update", "exercise", "execute"],
+        );
+        let facts = link_environment_modules(
+            vec![EnvironmentModule {
+                path: "App.java".into(),
+                language: "java".into(),
+                facts: f.facts.clone(),
+            }],
+            10000,
+        );
+        assert!(
+            facts
+                .transfers
+                .iter()
+                .any(|t| t.from.function == f.ids["update"] && t.to.function == f.ids["exercise"]),
+            "{assignment}: {facts:?}"
+        );
+    }
+}
+#[test]
+fn java_static_field_local_shadow_has_no_initializer_link() {
+    let f = Fixture::new(
+        "java",
+        "class App {static Y selected=new X(); static int exercise(){Y selected=new W();return selected.execute();}} class X {int execute(){return 100;}}",
+        &["<clinit>", "exercise", "execute"],
+    );
+    assert!(
+        !f.facts
+            .transfers
+            .iter()
+            .any(|t| t.to.function == f.ids["exercise"] && t.from.function == f.ids["<clinit>"])
+    );
+    assert!(!f.reaches_x());
+}
+#[test]
+fn java_static_and_instance_initializers_remain_separate() {
+    let f = Fixture::new(
+        "java",
+        "class App {static Y selected=new X(); Y other=new W(); static {selected=new X();} {other=new W();} static int exercise(){return selected.execute();}} class X {int execute(){return 100;}}",
+        &["<clinit>", "<instanceinit>", "exercise", "execute"],
+    );
+    assert!(
+        f.facts
+            .transfers
+            .iter()
+            .any(|t| t.to.function == f.ids["exercise"] && t.from.function == f.ids["<clinit>"])
+    );
+    assert!(
+        !f.facts
+            .transfers
+            .iter()
+            .any(|t| t.to.function == f.ids["exercise"]
+                && t.from.function == f.ids["<instanceinit>"])
+    );
+    let instance = &f.cfgs[&f.ids["<instanceinit>"]].operands;
+    assert!(
+        instance
+            .formals
+            .iter()
+            .any(|f| f.kind == FormalKind::Receiver)
+    );
+    assert!(!instance.field_writes.is_empty());
+    assert!(f.reaches_x());
+}
+#[test]
+fn java_static_fields_link_across_files_without_receiver_objects() {
+    let a = Fixture::new_with_base(
+        "java",
+        "package p; class Holder {static Y selected=new W(); static int read(){return selected.execute();}}",
+        &["<clinit>", "read"],
+        1000,
+    );
+    let b = Fixture::new_with_base(
+        "java",
+        "package p; class App {static void update(){Holder.selected=new X();} static int exercise(){return Holder.selected.execute();}}",
+        &["update", "exercise"],
+        2000,
+    );
+    let facts = link_environment_modules(
+        vec![
+            EnvironmentModule {
+                path: "p/Holder.java".into(),
+                language: "java".into(),
+                facts: a.facts,
+            },
+            EnvironmentModule {
+                path: "p/App.java".into(),
+                language: "java".into(),
+                facts: b.facts,
+            },
+        ],
+        10000,
+    );
+    assert!(
+        facts
+            .transfers
+            .iter()
+            .any(|t| t.from.function == b.ids["update"] && t.to.function == a.ids["read"])
+    );
+    assert!(
+        facts
+            .transfers
+            .iter()
+            .any(|t| t.from.function == a.ids["<clinit>"] && t.to.function == b.ids["exercise"])
+    );
+}

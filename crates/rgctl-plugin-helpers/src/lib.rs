@@ -5,6 +5,7 @@ pub mod complexity;
 pub mod ecmascript;
 pub mod framework;
 pub mod green_cst;
+pub mod java;
 pub mod python;
 pub mod qualified_names;
 pub mod spans;

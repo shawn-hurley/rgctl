@@ -36,6 +36,16 @@ pub(crate) fn lower_function_operands(
     body: Node<'_>,
     source: &[u8],
 ) -> Result<FunctionOperands> {
+    lower_operand_roots(language, function, body, &[body], source)
+}
+
+pub(crate) fn lower_operand_roots(
+    language: &str,
+    function: Node<'_>,
+    body: Node<'_>,
+    roots: &[Node<'_>],
+    source: &[u8],
+) -> Result<FunctionOperands> {
     let language = match canonical_language_id(language).unwrap_or("") {
         "java" => OperandLanguage::Java,
         "javascript" => OperandLanguage::JavaScript,
@@ -78,7 +88,7 @@ pub(crate) fn lower_function_operands(
         lowerer.diagnostic(function, OperandDiagnosticKind::MalformedSyntax)?;
     }
     lowerer.parameters(function)?;
-    let mut stack = vec![body];
+    let mut stack: Vec<_> = roots.iter().rev().copied().collect();
     while let Some(node) = stack.pop() {
         if lowerer.is_callable_boundary(node) {
             // Keep the creation/definition value in its enclosing procedure;
@@ -123,7 +133,26 @@ pub(crate) fn lower_function_operands(
         for (target, value) in local_write_sources(node) {
             if let Some(value) = value {
                 let value = lowerer.expression(value, 0)?;
-                if let Some((receiver, member)) = member_parts(target)
+                if language == OperandLanguage::Java
+                    && node.kind() == "variable_declarator"
+                    && node.parent().is_some_and(|n| {
+                        n.kind() == "field_declaration" && !rgctl_plugin_helpers::java::is_static(n)
+                    })
+                    && let Some(receiver) = lowerer
+                        .facts
+                        .formals
+                        .iter()
+                        .find(|f| f.kind == FormalKind::Receiver)
+                        .map(|f| f.value)
+                    && lowerer.field_write_nodes.insert(target.id())
+                {
+                    let member = lowerer.node_name(target)?;
+                    lowerer.facts.field_writes.push(FieldWriteFact {
+                        receiver,
+                        member,
+                        value,
+                    });
+                } else if let Some((receiver, member)) = member_parts(target)
                     && lowerer.field_write_nodes.insert(target.id())
                 {
                     let receiver = lowerer.expression(receiver, 0)?;
@@ -313,6 +342,8 @@ impl<'a> Lowerer<'a> {
                     "method_declaration"
                         | "constructor_declaration"
                         | "compact_constructor_declaration"
+                        | "class_body"
+                        | "enum_body"
                 )
             {
                 self.facts.receiver_convention = ReceiverConvention::ImplicitThis;
@@ -921,7 +952,9 @@ pub(crate) fn local_write_sources(node: Node<'_>) -> Vec<(Node<'_>, Option<Node<
         "variable_declaration"
         | "lexical_declaration"
         | "local_variable_declaration"
-        | "local_declaration_statement" => children(root)
+        | "local_declaration_statement"
+        | "field_declaration"
+        | "constant_declaration" => children(root)
             .into_iter()
             .filter(|n| n.kind() == "variable_declarator")
             .filter_map(|n| {

@@ -62,8 +62,6 @@ pub(crate) struct ExtractCtx {
     /// Maps an anonymous class's `class_body` node id to a synthetic owner
     /// name (`$AnonymousN`), assigned in document order.
     anon_names: HashMap<usize, String>,
-    /// Per-owner counters for instance initializer blocks (`Type.<initblock>N`).
-    initblock_counters: RefCell<HashMap<String, usize>>,
     /// Per-enclosing-callable counters for lambda expressions (`Owner.$lambda$N`),
     /// assigned in document order on first visits and reused by later walks.
     lambda_counters: RefCell<HashMap<String, usize>>,
@@ -80,7 +78,6 @@ impl ExtractCtx {
             imports,
             static_imports,
             anon_names: Self::collect_anonymous_names(root),
-            initblock_counters: RefCell::new(HashMap::new()),
             lambda_counters: RefCell::new(HashMap::new()),
             lambda_indices: RefCell::new(HashMap::new()),
         }
@@ -708,9 +705,18 @@ impl JavaPlugin {
                     let owner = self.find_containing_type_name(parent, source, ctx)?;
                     return Some(format!("{}.<init>", ctx.qualify_type(&owner)));
                 }
-                "static_initializer" => {
+                "static_initializer" | "field_declaration" | "constant_declaration" => {
                     let owner = self.find_containing_type_name(parent, source, ctx)?;
-                    return Some(format!("{}.<clinit>", ctx.qualify_type(&owner)));
+                    let name = if rgctl_plugin_helpers::java::is_static(parent) {
+                        "<clinit>"
+                    } else {
+                        "<instanceinit>"
+                    };
+                    return Some(format!("{}.{name}", ctx.qualify_type(&owner)));
+                }
+                "block" if parent.parent().is_some_and(|n| n.kind() == "class_body") => {
+                    let owner = self.find_containing_type_name(parent, source, ctx)?;
+                    return Some(format!("{}.<instanceinit>", ctx.qualify_type(&owner)));
                 }
                 _ => {}
             }
@@ -912,79 +918,42 @@ impl JavaPlugin {
         callable_identity::try_symbol(symbol, node, source, Policy::Java)
     }
 
-    pub(crate) fn extract_static_initializer(
+    /// One source-ordered procedure per type/storage convention, including
+    /// implicit field initializers and every explicit initializer block.
+    pub(crate) fn push_initialization_symbols(
         &self,
-        node: Node,
+        body: Node,
         source: &[u8],
-        file_path: &str,
+        file: &str,
         ctx: &ExtractCtx,
-    ) -> Result<Symbol> {
-        let owner = self.find_containing_type_name(node, source, ctx);
-        let qualified_name = owner.map(|o| format!("{}.<clinit>", ctx.qualify_type(&o)));
-
-        let mut symbol = Symbol {
-            name: "<clinit>".to_string(),
-            symbol_type: SymbolType::Function,
-            qualified_name,
-            location: source_location(node, file_path),
-            signature: Some(first_line_text(node, source)?),
-            return_type: None,
-            parameters: vec![],
-            fields: vec![],
-            modifiers: vec![],
-            documentation: None,
-            metadata: serde_json::json!({
-                "language": "java",
-                "is_static_initializer": true,
-            }),
-            ..Default::default()
+        symbols: &mut Vec<Symbol>,
+    ) -> Result<()> {
+        let Some(owner) = body
+            .parent()
+            .filter(|n| TYPE_DECL_KINDS.contains(&n.kind()))
+        else {
+            return Ok(());
         };
-        record_symbol_spans(&mut symbol, node, node.child_by_field_name("name"));
-        Ok(symbol)
-    }
-
-    /// Instance initializer block: a bare `block` that is a direct child of a
-    /// `class_body` (tree-sitter-java has no dedicated node kind for these).
-    pub(crate) fn extract_instance_initializer(
-        &self,
-        node: Node,
-        source: &[u8],
-        file_path: &str,
-        ctx: &ExtractCtx,
-    ) -> Result<Symbol> {
-        let owner_qn = self
-            .find_containing_type_name(node, source, ctx)
-            .map(|o| ctx.qualify_type(&o));
-
-        let idx = {
-            let key = owner_qn.clone().unwrap_or_else(|| "<unknown>".to_string());
-            let mut counters = ctx.initblock_counters.borrow_mut();
-            let counter = counters.entry(key).or_insert(0);
-            *counter += 1;
-            *counter
-        };
-        let name = format!("<initblock>{idx}");
-        let qualified_name = owner_qn.map(|o| format!("{o}.{name}"));
-
-        let mut symbol = Symbol {
-            name,
-            symbol_type: SymbolType::Function,
-            qualified_name,
-            location: source_location(node, file_path),
-            signature: Some(first_line_text(node, source)?),
-            return_type: None,
-            parameters: vec![],
-            fields: vec![],
-            modifiers: vec![],
-            documentation: None,
-            metadata: serde_json::json!({
-                "language": "java",
-                "is_instance_initializer": true,
-            }),
-            ..Default::default()
-        };
-        record_symbol_spans(&mut symbol, node, node.child_by_field_name("name"));
-        Ok(symbol)
+        let qn = self.type_node_qualified_name(owner, source, ctx);
+        for (static_, name, node) in [(true, "<clinit>", owner), (false, "<instanceinit>", body)] {
+            if rgctl_plugin_helpers::java::initialization_roots(owner, static_).is_empty()
+                && owner.child_by_field_name("superclass").is_none()
+            {
+                continue;
+            }
+            let mut symbol = Symbol {
+                name: name.into(),
+                symbol_type: SymbolType::Function,
+                qualified_name: Some(format!("{qn}.{name}")),
+                location: source_location(node, file),
+                return_type: Some("void".into()),
+                metadata: serde_json::json!({"language":"java", "is_static_initializer":static_, "is_instance_initializer":!static_, "is_aggregate_initializer":true, "has_initializer_body":!rgctl_plugin_helpers::java::initialization_roots(owner,static_).is_empty()}),
+                ..Default::default()
+            };
+            record_symbol_spans(&mut symbol, node, None);
+            symbols.push(symbol);
+        }
+        Ok(())
     }
 
     /// Extract parameters from `formal_parameters`, handling both
@@ -2174,6 +2143,112 @@ impl JavaPlugin {
         self.extract_lambda_calls(root, source, file_path, ctx, relations)?;
         self.extract_throws_refs(root, source, file_path, ctx, &same_file_types, relations)?;
         self.extract_module_relations(root, source, file_path, relations)?;
+        self.extract_initialization_relations(root, source, file_path, ctx, symbols, relations)?;
+        Ok(())
+    }
+
+    /// Initializer activation is conservative: invoking a method of a type
+    /// may require its class initialization. Instance initialization is reached
+    /// from constructors; Instantiates edges also retain allocation ownership.
+    fn extract_initialization_relations(
+        &self,
+        root: Node,
+        source: &[u8],
+        file: &Path,
+        ctx: &ExtractCtx,
+        symbols: &[Symbol],
+        relations: &mut Vec<Relation>,
+    ) -> Result<()> {
+        let same_file_types = Self::same_file_types(symbols);
+        let mut initializers: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        for s in symbols
+            .iter()
+            .filter(|s| s.metadata["is_aggregate_initializer"] == true)
+        {
+            if let Some((owner, _)) = s.qualified_name.as_deref().and_then(|q| q.rsplit_once('.')) {
+                initializers.entry(owner).or_default().push(s);
+            }
+        }
+        for s in symbols.iter().filter(|s| {
+            s.symbol_type == SymbolType::Function && s.metadata["is_aggregate_initializer"] != true
+        }) {
+            let Some(from) = s.qualified_name.as_deref() else {
+                continue;
+            };
+            let Some((owner, _)) = from.rsplit_once('.') else {
+                continue;
+            };
+            for init in initializers.get(owner).into_iter().flatten() {
+                if init.metadata["is_static_initializer"] == true
+                    || s.metadata["is_constructor"] == true
+                {
+                    let to = init.qualified_name.clone().unwrap_or_default();
+                    relations.push(Relation { from:from.into(), to:to.clone(), relation_type:RelationType::Calls,
+                        location:s.location.clone(), to_qualified_hint:Some(to),
+                        metadata:serde_json::json!({"language":"java", "implicit_initialization":true, "activation":"possible"}), ..Default::default() });
+                }
+            }
+        }
+        // Calls occurring outside an explicit callable scope (field/static
+        // initializers) need the same import/receiver resolution as method calls.
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "method_invocation"
+                && let Some(qn) = self.find_containing_callable_qn(node, source, ctx)
+                && let Some(index) = symbols.iter().position(|s| {
+                    s.qualified_name.as_deref() == Some(&qn)
+                        && s.metadata["is_aggregate_initializer"] == true
+                })
+            {
+                let location = source_location(node, &file.to_string_lossy());
+                if !relations.iter().any(|r| {
+                    r.relation_type == RelationType::Calls && r.from == qn && r.location == location
+                }) {
+                    self.flush_pending_calls(
+                        &[(node, index)],
+                        source,
+                        file,
+                        ctx,
+                        symbols,
+                        relations,
+                    );
+                }
+            }
+            if let Some(superclass) = node.child_by_field_name("superclass") {
+                let mut cursor = superclass.walk();
+                if let Some(ty) = superclass.named_children(&mut cursor).next()
+                    && let Ok(raw) = ty.utf8_text(source)
+                {
+                    let parent = raw.split('<').next().unwrap_or(raw).trim();
+                    let parent = ctx
+                        .resolve_type_fqn(parent, &same_file_types)
+                        .unwrap_or_else(|| parent.into());
+                    let owner = self.type_node_qualified_name(node, source, ctx);
+                    for name in ["<clinit>", "<instanceinit>"] {
+                        let to = format!("{parent}.{name}");
+                        relations.push(Relation{from:format!("{owner}.{name}"),to:to.clone(),to_qualified_hint:Some(to),relation_type:RelationType::Calls,
+                            location:source_location(superclass,&file.to_string_lossy()),metadata:serde_json::json!({"language":"java","implicit_initialization":true,"activation":"possible"}),..Default::default()});
+                    }
+                }
+            }
+            // A qualified static field access can initialize another class even
+            // when no method on that class is called. Unknown targets remain
+            // unresolved; class literals deliberately do not use this path.
+            if node.kind() == "field_access"
+                && let Some(object) = node.child_by_field_name("object")
+                && let Ok(raw) = object.utf8_text(source)
+                && object.kind() != "this"
+                && object.kind() != "super"
+                && let Some(from) = self.find_containing_callable_qn(node, source, ctx)
+                && let Some(owner) = ctx.resolve_type_fqn(raw, &same_file_types)
+            {
+                let to = format!("{owner}.<clinit>");
+                relations.push(Relation{from,to:to.clone(),to_qualified_hint:Some(to),relation_type:RelationType::Calls,
+                    location:source_location(node,&file.to_string_lossy()),metadata:serde_json::json!({"language":"java","implicit_initialization":true,"activation":"possible"}),..Default::default()});
+            }
+            let mut c = node.walk();
+            stack.extend(node.named_children(&mut c));
+        }
         Ok(())
     }
 
@@ -2244,11 +2319,8 @@ impl JavaPlugin {
             "module_declaration" => {
                 symbols.push(self.extract_module_symbol(node, source, file_path)?)
             }
-            "static_initializer" => {
-                symbols.push(self.extract_static_initializer(node, source, file_path, ctx)?)
-            }
-            "block" if node.parent().map(|p| p.kind()) == Some("class_body") => {
-                symbols.push(self.extract_instance_initializer(node, source, file_path, ctx)?)
+            "class_body" | "interface_body" | "enum_body" => {
+                self.push_initialization_symbols(node, source, file_path, ctx, symbols)?;
             }
             "import_declaration" => {
                 let text = node.utf8_text(source)?.trim().to_string();
@@ -2300,7 +2372,7 @@ impl LanguagePlugin for JavaPlugin {
     }
 
     fn cache_fingerprint(&self) -> Option<&[u8]> {
-        Some(b"java-shared-callable-identity-v1")
+        Some(b"java-class-initialization-v2")
     }
 
     fn extract_symbols(&self, file_path: &Path, source: &[u8]) -> Result<Vec<Symbol>> {
@@ -2486,67 +2558,34 @@ impl JavaPlugin {
     /// Extract method call relationships
     fn extract_calls(
         &self,
-        node: Node,
+        root: Node,
         source: &[u8],
-        file_path: &Path,
+        file: &Path,
         symbols: &[Symbol],
         relations: &mut Vec<Relation>,
     ) -> Result<()> {
-        let mut cursor = node.walk();
-
-        // Find the containing method for any calls we find
-        let containing_method = self.find_containing_method(node, source, symbols);
-
-        // Look for method invocations
-        if node.kind() == "method_invocation"
-            && let Some(from_method) = &containing_method
-        {
-            // Extract the method name being called
-            if let Some(method_name_node) = node.child_by_field_name("name") {
-                let simple_name = method_name_node.utf8_text(source).unwrap_or("").to_string();
-
-                if !simple_name.is_empty() {
-                    // Try to find the qualified name from symbols in this file
-                    let local_qualified = symbols
-                        .iter()
-                        .find(|s| s.name == simple_name && s.symbol_type == SymbolType::Function)
-                        .and_then(|s| s.qualified_name.as_ref())
-                        .cloned();
-
-                    // Best-effort: try to infer the target class from the object
-                    // For example: helper.transform() → infer "Helper" class
-                    let (to_qualified_hint, to_type_hint) =
-                        if let Some(object_node) = node.child_by_field_name("object") {
-                            self.infer_method_target(object_node, &simple_name, source, node)
-                        } else {
-                            (None, None)
-                        };
-
-                    relations.push(Relation {
-                        from: from_method.clone(),
-                        to: local_qualified.unwrap_or(simple_name.clone()),
-                        relation_type: RelationType::Calls,
-                        location: SourceLocation {
-                            file: file_path.to_string_lossy().to_string(),
-                            start_line: node.start_position().row + 1,
-                            end_line: node.end_position().row + 1,
-                            start_column: node.start_position().column,
-                            end_column: node.end_position().column,
-                        },
-                        metadata: serde_json::json!({ "language": "java" }),
-                        to_qualified_hint,
-                        to_type_hint,
-                        ..Default::default()
-                    });
-                }
+        let ctx = ExtractCtx::new(root, source);
+        let mut stack = vec![root];
+        let mut pending = Vec::new();
+        while let Some(node) = stack.pop() {
+            if node.kind() == "method_invocation"
+                && let Some(qn) = self.find_containing_callable_qn(node, source, &ctx)
+                && let Some((index, _)) = symbols
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.qualified_name.as_deref() == Some(&qn))
+                    .filter(|(_, s)| {
+                        s.location.start_line <= node.start_position().row + 1
+                            && s.location.end_line > node.end_position().row
+                    })
+                    .min_by_key(|(_, s)| s.location.end_line - s.location.start_line)
+            {
+                pending.push((node, index));
             }
+            let mut c = node.walk();
+            stack.extend(node.named_children(&mut c));
         }
-
-        // Recurse into children
-        for child in node.children(&mut cursor) {
-            self.extract_calls(child, source, file_path, symbols, relations)?;
-        }
-
+        self.flush_pending_calls(&pending, source, file, &ctx, symbols, relations);
         Ok(())
     }
 
@@ -3008,15 +3047,23 @@ impl JavaPlugin {
             if !last_segment.is_empty() {
                 let fqn = ctx.resolve_type_fqn(simple, same_file_types);
                 relations.push(Relation {
-                    from,
+                    from: from.clone(),
                     to: last_segment.to_string(),
                     relation_type: RelationType::Instantiates,
                     location: source_location(node, &file_path.to_string_lossy()),
                     metadata: serde_json::json!({ "language": "java" }),
-                    to_qualified_hint: fqn,
+                    to_qualified_hint: fqn.clone(),
                     to_type_hint: Some(last_segment.to_string()),
                     ..Default::default()
                 });
+                if let Some(owner) = fqn {
+                    for name in ["<clinit>", "<instanceinit>"] {
+                        let to = format!("{owner}.{name}");
+                        relations.push(Relation{from:from.clone(),to:to.clone(),relation_type:RelationType::Calls,
+                            to_qualified_hint:Some(to),location:source_location(node,&file_path.to_string_lossy()),
+                            metadata:serde_json::json!({"language":"java","implicit_initialization":true,"activation":"possible"}),..Default::default()});
+                    }
+                }
             }
         }
 
@@ -3163,7 +3210,7 @@ impl JavaPlugin {
     /// `field_access` (`this.status`, `obj.status`, `Type.field`) →
     /// `References` from the enclosing callable toward a best-effort field
     /// target. `this.field` resolves the owning type; `identifier.field`
-    /// tries the same field/local type lookup used by `infer_method_target`.
+    /// uses the declared field/local receiver type when available.
     fn extract_field_access(
         &self,
         node: Node,
@@ -3585,48 +3632,6 @@ impl JavaPlugin {
         Ok(())
     }
 
-    /// Find the fully qualified name of the method containing a given node
-    fn find_containing_method(
-        &self,
-        node: Node,
-        source: &[u8],
-        _symbols: &[Symbol],
-    ) -> Option<String> {
-        let mut current = node;
-        let mut method_name = None;
-        let mut class_name = None;
-
-        // Find method name first
-        while let Some(parent) = current.parent() {
-            if parent.kind() == "method_declaration" && method_name.is_none() {
-                let mut cursor = parent.walk();
-                for child in parent.children(&mut cursor) {
-                    if child.kind() == "identifier" {
-                        method_name = child.utf8_text(source).ok().map(|s| s.to_string());
-                        break;
-                    }
-                }
-            }
-            if parent.kind() == "class_declaration" && class_name.is_none() {
-                let mut cursor = parent.walk();
-                for child in parent.children(&mut cursor) {
-                    if child.kind() == "identifier" {
-                        class_name = child.utf8_text(source).ok().map(|s| s.to_string());
-                        break;
-                    }
-                }
-            }
-            current = parent;
-        }
-
-        // Return qualified name if both found, otherwise just method name
-        match (class_name, method_name) {
-            (Some(class), Some(method)) => Some(format!("{}.{}", class, method)),
-            (None, Some(method)) => Some(method),
-            _ => None,
-        }
-    }
-
     /// Find the name of a class
     fn find_class_name(&self, node: Node, source: &[u8]) -> Result<String> {
         let mut cursor = node.walk();
@@ -3884,53 +3889,6 @@ impl JavaPlugin {
                 let simple = strip_java_type_sugar(&fqn);
                 return (Some(simple), Some(format!("{fqn}.{callee}")));
             }
-        }
-
-        (None, None)
-    }
-
-    /// Best-effort attempt to infer the target class for a method call.
-    ///
-    /// For example, given `helper.transform()`:
-    /// - Looks for a field/variable named "helper"
-    /// - Extracts its type (e.g., "Helper")
-    /// - Returns ("Helper.transform", "Helper")
-    ///
-    /// This is a heuristic and may not always be accurate:
-    /// - Doesn't follow type inference through assignments
-    /// - Doesn't resolve imports to fully qualified names
-    /// - Assumes simple field/variable declarations
-    fn infer_method_target(
-        &self,
-        object_node: Node,
-        method_name: &str,
-        source: &[u8],
-        call_site: Node,
-    ) -> (Option<String>, Option<String>) {
-        // Get the object name (e.g., "helper" from "helper.transform()")
-        let object_name = match object_node.utf8_text(source) {
-            Ok(name) => name,
-            Err(_) => {
-                return (None, None);
-            }
-        };
-
-        // Look for field declaration or variable declaration with this name
-        // Walk up to the containing class
-        let containing_class = self.find_containing_class_node(call_site);
-
-        if let Some(class_node) = containing_class {
-            // Look for field declarations in the class
-            if let Some(type_name) = self.find_field_type(class_node, object_name, source) {
-                let qualified_hint = format!("{}.{}", type_name, method_name);
-                return (Some(qualified_hint), Some(type_name));
-            }
-        }
-
-        // Fallback: check for local variable declarations
-        if let Some(type_name) = self.find_local_variable_type(call_site, object_name, source) {
-            let qualified_hint = format!("{}.{}", type_name, method_name);
-            return (Some(qualified_hint), Some(type_name));
         }
 
         (None, None)
@@ -5631,5 +5589,71 @@ class Service {
             }),
             "expected Calls toward builder()"
         );
+    }
+    #[test]
+    fn java_initialization_covers_fields_blocks_and_activation() {
+        let plugin = JavaPlugin::new().unwrap();
+        let code=b"package p; class App {static Object x=make(); static {first();} static {second();} Object y=new Other(); {instance();} App(){} static void use(){} } class Other {}";
+        let result = plugin.extract_all(Path::new("App.java"), code).unwrap();
+        let functions: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.metadata["is_aggregate_initializer"] == true)
+            .collect();
+        assert_eq!(functions.len(), 2);
+        for target in ["make", "first", "second"] {
+            assert!(
+                result.relations.iter().any(|r| r.from == "p.App.<clinit>"
+                    && r.to.ends_with(target)
+                    && r.relation_type == RelationType::Calls),
+                "{target}: {:?}",
+                result.relations
+            );
+        }
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.from == "p.App.<instanceinit>"
+                    && r.to == "Other"
+                    && r.relation_type == RelationType::Instantiates)
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.from == "p.App.use" && r.to == "p.App.<clinit>")
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.from == "p.App.<init>" && r.to == "p.App.<instanceinit>")
+        );
+    }
+    #[test]
+    fn java_initialization_identities_are_owned_by_nested_types() {
+        let plugin = JavaPlugin::new().unwrap();
+        let code = b"package p; class A {static Object x=one(); class B {static Object x=two();}}";
+        let result = plugin.extract_all(Path::new("A.java"), code).unwrap();
+        for (owner, target) in [("p.A.<clinit>", "one"), ("p.A.B.<clinit>", "two")] {
+            assert!(
+                result
+                    .relations
+                    .iter()
+                    .any(|r| r.from == owner && r.to.ends_with(target))
+            );
+        }
+        let split = plugin.extract_symbols(Path::new("A.java"), code).unwrap();
+        let split_rels = plugin
+            .extract_relations(Path::new("A.java"), code, &split)
+            .unwrap();
+        for (owner, target) in [("p.A.<clinit>", "one"), ("p.A.B.<clinit>", "two")] {
+            assert!(
+                split_rels
+                    .iter()
+                    .any(|r| r.from == owner && r.to.ends_with(target))
+            );
+        }
     }
 }

@@ -22,6 +22,17 @@ pub struct EnvironmentExternalRead {
     /// Imported/exported name, including a selected namespace member.
     pub name: String,
 }
+/// A source assignment into named static storage. A missing RHS keeps the
+/// declaration incomplete instead of silently discarding the write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentExternalStore {
+    /// Source resolution domain (`@java` for qualified Java fields).
+    pub module: String,
+    /// Fully qualified declaring type and field.
+    pub name: String,
+    /// Captured RHS, or missing producer evidence.
+    pub value: Option<ValueRef>,
+}
 /// Indexed module facts from an immutable repository-relative source file.
 pub struct EnvironmentModule {
     /// Repository-relative source path; no filesystem lookup occurs in linking.
@@ -176,6 +187,14 @@ fn normalized(path: &Path) -> String {
 }
 fn candidates(from: &EnvironmentModule, module: &str, files: &[EnvironmentModule]) -> Vec<usize> {
     let parent = Path::new(&from.path).parent().unwrap_or(Path::new(""));
+    if module == "@java" {
+        return files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.language == "java")
+            .map(|(i, _)| i)
+            .collect();
+    }
     if module == "@package" {
         return files
             .iter()
@@ -233,9 +252,56 @@ fn candidates(from: &EnvironmentModule, module: &str, files: &[EnvironmentModule
 }
 /// Join already indexed source modules without reparsing or filesystem access.
 /// Unknown external packages/exports remain diagnostics, never a successful negative.
-pub fn link_environment_modules(files: Vec<EnvironmentModule>, limit: usize) -> EnvironmentFacts {
+pub fn link_environment_modules(
+    mut files: Vec<EnvironmentModule>,
+    limit: usize,
+) -> EnvironmentFacts {
     let mut out = EnvironmentFacts::default();
     let mut checks = 0usize;
+    let external: Vec<_> = files
+        .iter()
+        .flat_map(|f| f.facts.external_stores.iter().cloned())
+        .take(limit.saturating_add(1))
+        .collect();
+    let mut changed = HashMap::<EnvironmentBinding, Vec<ValueRef>>::new();
+    'stores: for write in external {
+        for f in &mut files {
+            for export in &mut f.facts.exports {
+                checks = checks.saturating_add(1);
+                if checks > limit {
+                    break 'stores;
+                }
+                if write.module == "@java" && f.language == "java" && export.name == write.name {
+                    if let Some(value) = write.value {
+                        export.values.push(value);
+                        changed.entry(export.binding).or_default().push(value);
+                    } else {
+                        out.diagnostics
+                            .push(EnvironmentDiagnostic::IncompleteStorage(export.binding));
+                    }
+                }
+            }
+        }
+    }
+    'locals: for file in &mut files {
+        let mut extra = Vec::new();
+        for t in &file.facts.transfers {
+            for &from in changed.get(&t.binding).into_iter().flatten() {
+                checks = checks.saturating_add(1);
+                if checks > limit {
+                    break 'locals;
+                }
+                if from != t.to {
+                    extra.push(EnvironmentTransfer {
+                        binding: t.binding,
+                        from,
+                        to: t.to,
+                    });
+                }
+            }
+        }
+        file.facts.transfers.extend(extra);
+    }
     let mut satisfied = HashSet::new();
     let mut resolved_modules: HashMap<(usize, String), Vec<usize>> = HashMap::new();
     for (from_index, from) in files.iter().enumerate() {

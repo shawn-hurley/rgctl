@@ -483,7 +483,9 @@ pub fn seek_function_node<'a>(
     else {
         return Ok(None);
     };
-    if function_kinds.contains(&node.kind()) {
+    if function_kinds.contains(&node.kind())
+        || (language == "java" && rgctl_plugin_helpers::java::initialization_name(node).is_some())
+    {
         return Ok(Some(node));
     }
     // Walk parents in case the named descendant is an inner name/body node.
@@ -593,7 +595,10 @@ fn collect_function_locations(
 ) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if function_kinds.contains(&node.kind())
+        if !(language == "java" && node.kind() == "static_initializer")
+            && (function_kinds.contains(&node.kind())
+                || (language == "java"
+                    && rgctl_plugin_helpers::java::initialization_name(node).is_some()))
             && let Some(func_name) = callable_name_for_cfg(node, source, language)
         {
             let loc = FunctionLocation {
@@ -620,6 +625,11 @@ fn parse_language(language: &str, source: &[u8]) -> Result<Tree> {
 
 /// Resolve the Function name CFG should look up, matching language-plugin naming.
 fn callable_name_for_cfg(node: Node<'_>, source: &[u8], language: &str) -> Option<String> {
+    if language == "java"
+        && let Some(name) = rgctl_plugin_helpers::java::initialization_name(node)
+    {
+        return Some(name.into());
+    }
     match language {
         "javascript" | "js" | "typescript" | "ts" => ecmascript_function_symbol_name(node, source),
         "puppet" => {
@@ -795,7 +805,10 @@ fn find_function_by_name<'a>(
     let mut stack = vec![node];
     let mut found = None;
     while let Some(node) = stack.pop() {
-        if function_kinds.contains(&node.kind())
+        if !(language == "java" && node.kind() == "static_initializer")
+            && (function_kinds.contains(&node.kind())
+                || (language == "java"
+                    && rgctl_plugin_helpers::java::initialization_name(node).is_some()))
             && let Some(func_name) = callable_name_for_cfg(node, source, language)
             && func_name == name
         {
@@ -862,6 +875,26 @@ fn build_cfg_from_function_node(
     source: &[u8],
     function_name: &str,
 ) -> Result<ControlFlowGraph> {
+    if language == "java"
+        && let Some(name) = rgctl_plugin_helpers::java::initialization_name(func_node)
+        && name == function_name
+    {
+        let static_ = name == "<clinit>";
+        let roots = rgctl_plugin_helpers::java::initialization_roots(func_node, static_);
+        let mut cfg = ControlFlowGraph::new();
+        cfg.operands =
+            crate::operands::lower_operand_roots(language, func_node, func_node, &roots, source)?;
+        let mut builder = CfgBuilder::new(&mut cfg, language);
+        builder.seed_formal_definitions(func_node.start_position().row + 1)?;
+        for root in roots {
+            builder.visit_statement(root, source)?;
+        }
+        if builder.flow_active {
+            builder.cfg.exits.push(builder.current_block);
+        }
+        builder.cfg.prune_unreachable_blocks();
+        return Ok(cfg);
+    }
     let mut cfg = ControlFlowGraph::new();
     cfg.local_types = crate::field_write_locals::extract_param_types_in_function(
         language,
@@ -1363,7 +1396,7 @@ impl<'a> CfgBuilder<'a> {
                 }
                 Ok(())
             }
-            "property_declaration" => {
+            "property_declaration" | "field_declaration" | "constant_declaration" => {
                 self.visit_declaration_initializers(node, source)?;
                 if !self.flow_active {
                     return Ok(());

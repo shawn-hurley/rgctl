@@ -9,10 +9,14 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 use uuid::Uuid;
 
+#[path = "java_fields.rs"]
+mod java_fields;
+
 #[path = "environment_program.rs"]
 mod program;
 pub use program::{
-    EnvironmentExport, EnvironmentExternalRead, EnvironmentModule, link_environment_modules,
+    EnvironmentExport, EnvironmentExternalRead, EnvironmentExternalStore, EnvironmentModule,
+    link_environment_modules,
 };
 
 /// A declaration-qualified storage identity, independent of its read spelling.
@@ -63,6 +67,9 @@ pub enum EnvironmentDiagnostic {
     },
     /// A declaration was found but no modeled parameter/initializer/store supplies it.
     MissingProducer(EnvironmentBinding),
+    /// A static field has an assignment whose RHS was not captured. Known
+    /// producers remain possible, but cannot support a complete exclusion.
+    IncompleteStorage(EnvironmentBinding),
     /// An implicit member needs a receiver not supplied by this procedure.
     MissingMemberReceiver(ValueRef),
     /// Literal syntax had no prepared canonical callable body/identity.
@@ -86,6 +93,9 @@ pub struct EnvironmentFacts {
     pub exports: Vec<EnvironmentExport>,
     /// Imported or same-package reads requiring program-level linking.
     pub external_reads: Vec<EnvironmentExternalRead>,
+    /// Qualified static-field assignments, resolved with the complete source inventory.
+    #[serde(default)]
+    pub external_stores: Vec<EnvironmentExternalStore>,
     /// Go package clause, when present, for directory-qualified package identity.
     pub package_name: Option<String>,
     /// Possible stores joined to reads by owning binding.
@@ -159,13 +169,50 @@ fn children(node: Node<'_>) -> Vec<Node<'_>> {
 fn is_class(kind: &str) -> bool {
     matches!(
         kind,
-        "class_declaration" | "class_definition" | "class_body" | "interface_declaration"
+        "class_declaration"
+            | "class_definition"
+            | "class_body"
+            | "interface_declaration"
+            | "interface_body"
+            | "enum_declaration"
+            | "enum_body"
+            | "record_declaration"
     )
 }
 fn is_block(kind: &str) -> bool {
     matches!(kind, "block" | "statement_block" | "compound_statement")
 }
 fn procedure_owner(node: Node<'_>, ids: &HashMap<OperandSpan, Uuid>, module: Uuid) -> Uuid {
+    let mut field = Some(node);
+    while let Some(n) = field {
+        if matches!(n.kind(), "field_declaration" | "constant_declaration") {
+            if rgctl_plugin_helpers::java::is_static(n) {
+                let mut class = n.parent();
+                while let Some(c) = class {
+                    if matches!(
+                        c.kind(),
+                        "class_declaration"
+                            | "interface_declaration"
+                            | "enum_declaration"
+                            | "record_declaration"
+                    ) {
+                        if let Ok(s) = span(c)
+                            && let Some(&id) = ids.get(&s)
+                        {
+                            return id;
+                        }
+                        break;
+                    }
+                    class = c.parent();
+                }
+            }
+            break;
+        }
+        if ids.contains_key(&span(n).unwrap_or(OperandSpan { start: 0, end: 0 })) {
+            break;
+        }
+        field = n.parent();
+    }
     let mut at = Some(node);
     while let Some(n) = at {
         if n.parent().is_some()
@@ -181,7 +228,14 @@ fn procedure_owner(node: Node<'_>, ids: &HashMap<OperandSpan, Uuid>, module: Uui
 fn nearest_class(node: Node<'_>) -> Option<OperandSpan> {
     let mut at = node.parent();
     while let Some(n) = at {
-        if matches!(n.kind(), "class_declaration" | "class_definition") {
+        if matches!(
+            n.kind(),
+            "class_declaration"
+                | "class_definition"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+        ) {
             return span(n).ok();
         }
         at = n.parent();
@@ -361,6 +415,7 @@ impl ParsedSourceFile {
             }
 
             if ids.get(&node_span).is_some_and(|id| *id != module)
+                && !is_class(node.kind())
                 && let Some(name) = node.child_by_field_name("name")
                 && name.kind() == "identifier"
             {
@@ -399,6 +454,8 @@ impl ParsedSourceFile {
                 let variable_decl = matches!(
                     node.kind(),
                     "variable_declarator"
+                        | "field_declaration"
+                        | "constant_declaration"
                         | "variable_declaration"
                         | "lexical_declaration"
                         | "local_variable_declaration"
@@ -538,7 +595,23 @@ impl ParsedSourceFile {
                 )
             };
             if let Some(d) = d
-                && !d.field
+                && language == "java"
+                && d.field
+                && java_fields::is_static_declaration(root, d.at)
+                && !values.contains_key(&(w.owner, w.rhs))
+            {
+                output
+                    .diagnostics
+                    .push(EnvironmentDiagnostic::IncompleteStorage(
+                        EnvironmentBinding {
+                            owner: d.owner,
+                            declaration: d.at,
+                        },
+                    ));
+            }
+            if let Some(d) = d
+                && (!d.field
+                    || (language == "java" && java_fields::is_static_declaration(root, d.at)))
                 && let Some(&value) = values.get(&(w.owner, w.rhs))
             {
                 stores
@@ -610,7 +683,9 @@ impl ParsedSourceFile {
                     &mut checks,
                     limits.max_checks,
                 ) {
-                    if d.field {
+                    if d.field
+                        && !(language == "java" && java_fields::is_static_declaration(root, d.at))
+                    {
                         let node = root
                             .named_descendant_for_byte_range(at.start as usize, at.end as usize);
                         if language == "java"
@@ -689,6 +764,39 @@ impl ParsedSourceFile {
                 binding,
                 values,
             });
+        }
+        if language == "java" {
+            java_fields::index(
+                root,
+                source,
+                &ids,
+                &decls,
+                &stores,
+                &values,
+                limits,
+                &mut output,
+            )?;
+        }
+        if language == "java" {
+            for read in &output.external_reads {
+                for export in output
+                    .exports
+                    .iter()
+                    .filter(|e| read.module == "@java" && read.name == e.name)
+                {
+                    for &from in &export.values {
+                        if checks >= limits.max_checks {
+                            break;
+                        }
+                        checks += 1;
+                        output.transfers.push(EnvironmentTransfer {
+                            binding: export.binding,
+                            from,
+                            to: read.value,
+                        });
+                    }
+                }
+            }
         }
         let mut ordered: Vec<_> = reads.into_iter().collect();
         ordered.sort_by_key(|(b, _)| (b.owner, b.declaration.start, b.declaration.end));
