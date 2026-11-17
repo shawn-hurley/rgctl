@@ -68,7 +68,9 @@ pub fn receiver_scope_facts(
         if matches!(
             n.kind(),
             "class_declaration"
+                | "class_definition"
                 | "function_declaration"
+                | "function_definition"
                 | "method_declaration"
                 | "type_spec"
                 | "variable_declarator"
@@ -113,8 +115,10 @@ pub fn receiver_scope_facts(
                 matches!(
                     p.kind(),
                     "function_declaration"
+                        | "function_definition"
                         | "method_declaration"
                         | "class_declaration"
+                        | "class_definition"
                         | "type_spec"
                         | "variable_declarator"
                         | "formal_parameter"
@@ -135,7 +139,7 @@ pub fn receiver_scope_facts(
                 head = p;
             }
             let direct = head.parent().is_some_and(|p| {
-                (matches!(p.kind(), "call_expression")
+                (matches!(p.kind(), "call_expression" | "call")
                     && p.child_by_field_name("function")
                         .is_some_and(|v| v.id() == head.id()))
                     || (p.kind() == "method_invocation"
@@ -203,6 +207,18 @@ pub fn receiver_scope_facts(
                     })
             }
             "typescript" | "go" => n.kind() == "function_declaration",
+            "javascript" => {
+                n.kind() == "function_declaration"
+                    && !n.children(&mut n.walk()).any(|n| n.kind() == "async")
+            }
+            "python" => {
+                n.kind() == "function_definition"
+                    && !n.parent().is_some_and(|p| {
+                        p.kind() == "decorated_definition"
+                            || p.parent().is_some_and(|n| n.kind() == "class_definition")
+                    })
+                    && !n.children(&mut n.walk()).any(|n| n.kind() == "async")
+            }
             _ => false,
         };
         if direct && let Some(s) = span(n) {
