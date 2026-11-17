@@ -303,3 +303,6 @@ pub mod value_origins;
 
 /// Declaration-qualified scope/environment transfers from cached native syntax.
 pub mod environment;
+
+/// Bounded dispatch refinement from completely known local receiver producers.
+pub mod receiver_closure;
