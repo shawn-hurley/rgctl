@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// Resolver-qualified exact named Java allocation.
+/// Resolver-qualified nominal allocation admitted by language-specific guards.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedConstruction {
     /// Exact source-local constructed result value.
     pub value: ValueRef,
-    /// Unambiguous canonical concrete class UUID from qualified extraction facts.
+    /// Unambiguous canonical concrete class/struct UUID from qualified native facts.
     pub type_id: Uuid,
 }
 /// All receiver producers in this supported local query resolve to these classes.

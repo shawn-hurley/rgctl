@@ -306,3 +306,9 @@ pub mod environment;
 
 /// Bounded dispatch refinement from completely known local receiver producers.
 pub mod receiver_closure;
+
+/// Complete producer checks across native direct argument/return bindings.
+pub mod receiver_program;
+
+/// Cached native declaration guards for receiver completeness consumers.
+pub mod receiver_scope;
